@@ -32,7 +32,7 @@ class Emitter {
 /* ==========================================================================
    Store
    ========================================================================== */
-class Store extends Emitter {
+export class Store extends Emitter {
   constructor() {
     super();
     this.mode = 'local';          // 'local' | 'cloud'
@@ -40,6 +40,7 @@ class Store extends Emitter {
     this.authState = 'loading';   // 'loading' | 'signed-out' | 'signed-in' | 'no-access'
     this.user = null;
     this.error = null;
+    this.authError = null;   // último fallo de acceso, para mostrarlo en pantalla
 
     this.data = {
       members:    [],
@@ -143,6 +144,27 @@ class Store extends Emitter {
 
     this._fb = { app, auth, db, authMod, fsMod };
     this.mode = 'cloud';
+
+    /* Si volvemos de un signInWithRedirect, aquí aparece el error.
+       Sin esto, un fallo en la redirección es invisible: el usuario
+       vuelve a la pantalla de acceso sin explicación. */
+    const veniaDeRedirect = sessionStorage.getItem('pomomomo.redirecting') === '1';
+    sessionStorage.removeItem('pomomomo.redirecting');
+    try {
+      await authMod.getRedirectResult(auth);
+    } catch (e) {
+      this.authError = {
+        code: e?.code || 'desconocido',
+        message: Store.authMessage(e?.code) || e?.message || 'Falló el acceso por redirección.'
+      };
+      console.error('[PomoMomo] Redirect:', e);
+    }
+    if (veniaDeRedirect && !auth.currentUser && !this.authError) {
+      this.authError = {
+        code: 'auth/redirect-sin-sesion',
+        message: 'La redirección volvió sin sesión. Suele pasar cuando el navegador bloquea cookies de terceros: prueba con la ventana emergente o desactiva el bloqueo para este sitio.'
+      };
+    }
 
     authMod.onAuthStateChanged(auth, async (u) => {
       this._teardownListeners();
@@ -283,21 +305,65 @@ class Store extends Emitter {
   }
 
   /* ---------- Autenticación ---------- */
-  async signIn() {
-    if (this.mode !== 'cloud') return;
+
+  /** Mensajes legibles para los códigos de error de Firebase Auth. */
+  static authMessage(code) {
+    const M = {
+      'auth/popup-blocked':            'El navegador bloqueó la ventana emergente. Permite las ventanas emergentes para este sitio, o usa el modo redirección.',
+      'auth/popup-closed-by-user':     'Cerraste la ventana de Google antes de terminar.',
+      'auth/cancelled-popup-request':  'Se abrió otra ventana de acceso. Cierra las ventanas de Google y vuelve a intentarlo.',
+      'auth/unauthorized-domain':      'Este dominio no está autorizado en Firebase. Agrégalo en Authentication → Settings → Dominios autorizados.',
+      'auth/operation-not-supported-in-this-environment': 'Este navegador no admite ventanas emergentes. Usa el modo redirección.',
+      'auth/network-request-failed':   'Falló la conexión de red. Revisa tu internet e inténtalo de nuevo.',
+      'auth/internal-error':           'Error interno de Firebase. Verifica que el proveedor Google esté habilitado en Authentication.',
+      'auth/operation-not-allowed':    'El acceso con Google no está habilitado. Actívalo en Firebase → Authentication → Sign-in method.',
+      'auth/too-many-requests':        'Demasiados intentos. Espera un momento antes de reintentar.',
+      'auth/web-storage-unsupported':  'El navegador bloquea el almacenamiento web. Desactiva el modo privado o permite cookies para este sitio.'
+    };
+    return M[code] || '';
+  }
+
+  /**
+   * @param {'popup'|'redirect'} via  Método de acceso.
+   * Los errores se propagan SIEMPRE con .code y .friendly para que la
+   * interfaz pueda mostrarlos: fallar en silencio deja al usuario atascado.
+   */
+  async signIn(via = 'popup') {
+    if (this.mode !== 'cloud') throw new Error('Firebase no está configurado.');
     const { auth, authMod } = this._fb;
     const provider = new authMod.GoogleAuthProvider();
     provider.setCustomParameters({ prompt: 'select_account' });
+
+    const decorate = (e) => {
+      const err = e instanceof Error ? e : new Error(String(e));
+      err.code = e?.code || 'desconocido';
+      err.friendly = Store.authMessage(err.code) || e?.message || 'No se pudo iniciar sesión.';
+      console.error('[PomoMomo] Auth:', err.code, e);
+      return err;
+    };
+
+    if (via === 'redirect') {
+      try {
+        sessionStorage.setItem('pomomomo.redirecting', '1');
+        await authMod.signInWithRedirect(auth, provider);
+      } catch (e) {
+        sessionStorage.removeItem('pomomomo.redirecting');
+        throw decorate(e);
+      }
+      return;
+    }
+
     try {
       await authMod.signInWithPopup(auth, provider);
     } catch (e) {
-      // Safari/iOS en modo standalone bloquea popups → redirect
-      if (['auth/popup-blocked', 'auth/operation-not-supported-in-this-environment', 'auth/cancelled-popup-request'].includes(e?.code)) {
-        await authMod.signInWithRedirect(auth, provider);
-      } else if (e?.code !== 'auth/popup-closed-by-user') {
-        throw e;
-      }
+      throw decorate(e);
     }
+  }
+
+  /** ¿Conviene ofrecer el modo redirección para este código de error? */
+  static canRetryWithRedirect(code) {
+    return ['auth/popup-blocked', 'auth/cancelled-popup-request',
+            'auth/operation-not-supported-in-this-environment'].includes(code);
   }
 
   async signOut() {

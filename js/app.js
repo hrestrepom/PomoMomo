@@ -2,7 +2,7 @@
    PomoMomo — Aplicación
    ========================================================================== */
 
-import { store, Stats, nowISO } from './store.js';
+import { store, Store, Stats, nowISO } from './store.js';
 import * as Chart from './charts.js';
 import {
   QUADRANTS, STATUSES, STATUS_ORDER, PALETTE, TILE_ICONS,
@@ -2206,15 +2206,36 @@ function viewSettings() {
    Pantallas de acceso
    ========================================================================== */
 function signInView() {
+  const e = store.authError;
   return `<div class="signin"><div class="signin-card">
     <div class="signin-mark">🍅</div>
     <h1 class="t-title mb-8">PomoMomo</h1>
     <p class="t-sub mb-24">Portafolios, proyectos y actividades con enfoque Pomodoro.</p>
+
+    <div id="signin-error" class="${e ? '' : 'hidden'}">
+      ${e ? signInErrorHtml(e) : ''}
+    </div>
+
     <button class="btn-google" id="btn-google">
       ${icon('google', 19)}<span>Continuar con Google</span>
     </button>
+
+    <button class="btn btn-plain btn-block mt-8 ${e && Store.canRetryWithRedirect?.(e.code) ? '' : 'hidden'}" id="btn-redirect">
+      Probar con redirección
+    </button>
+
     <p class="t-foot mt-16">Solo las personas invitadas pueden entrar a este espacio.</p>
   </div></div>`;
+}
+
+function signInErrorHtml(e) {
+  return `<div class="banner banner-warn mb-16" style="text-align:left;align-items:flex-start">
+    ${icon('warning', 17)}
+    <span class="col g-4 grow">
+      <span>${esc(e.message)}</span>
+      <span class="t-cap" style="color:inherit;opacity:.7">Código: ${esc(e.code)}</span>
+    </span>
+  </div>`;
 }
 
 function noAccessView() {
@@ -2228,13 +2249,36 @@ function noAccessView() {
 }
 
 function bindSignIn() {
-  $('#btn-google')?.addEventListener('click', async (e) => {
-    const b = e.currentTarget;
-    b.disabled = true;
-    try { await store.signIn(); }
-    catch (err) { toast(err.message || 'No se pudo iniciar sesión', 'err'); }
-    finally { b.disabled = false; }
-  });
+  const showError = (err) => {
+    store.authError = {
+      code: err?.code || 'desconocido',
+      message: err?.friendly || err?.message || 'No se pudo iniciar sesión.'
+    };
+    const box = $('#signin-error');
+    if (box) {
+      box.innerHTML = signInErrorHtml(store.authError);
+      box.classList.remove('hidden');
+    }
+    $('#btn-redirect')?.classList.toggle('hidden', !Store.canRetryWithRedirect(store.authError.code));
+  };
+
+  const attempt = async (btn, via) => {
+    btn.disabled = true;
+    const original = btn.innerHTML;
+    btn.innerHTML = via === 'redirect' ? 'Redirigiendo…' : `${icon('google', 19)}<span>Abriendo Google…</span>`;
+    try {
+      await store.signIn(via);
+      store.authError = null;
+    } catch (err) {
+      showError(err);
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = original;
+    }
+  };
+
+  $('#btn-google')?.addEventListener('click', (ev) => attempt(ev.currentTarget, 'popup'));
+  $('#btn-redirect')?.addEventListener('click', (ev) => attempt(ev.currentTarget, 'redirect'));
   $('#btn-signout')?.addEventListener('click', () => store.signOut());
 }
 
