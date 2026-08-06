@@ -3,6 +3,9 @@
    ========================================================================== */
 
 import { store, Store, Stats, nowISO } from './store.js';
+import {
+  FRAMEWORKS, LEVELS, PRACTICES, diagnose, practiceById, practicesByLevel, scoreLabel
+} from './practices.js';
 import * as Chart from './charts.js';
 import {
   QUADRANTS, STATUSES, STATUS_ORDER, PALETTE, TILE_ICONS,
@@ -73,7 +76,8 @@ const NAV = [
     { id: 'activities', label: 'Actividades', icon: 'checklist' }
   ]},
   { group: 'Análisis', items: [
-    { id: 'metrics',    label: 'Métricas',    icon: 'chart' }
+    { id: 'metrics',    label: 'Métricas',    icon: 'chart' },
+    { id: 'practices',  label: 'Prácticas',   icon: 'book' }
   ]},
   { group: 'Espacio', items: [
     { id: 'team',       label: 'Equipo',      icon: 'people' },
@@ -239,6 +243,7 @@ function moreSheet() {
   const links = [
     { id: 'portfolios', label: 'Portafolios', icon: 'layers' },
     { id: 'projects',   label: 'Proyectos',   icon: 'briefcase' },
+    { id: 'practices',  label: 'Prácticas',   icon: 'book' },
     { id: 'team',       label: 'Equipo',      icon: 'people' },
     { id: 'settings',   label: 'Ajustes',     icon: 'gear' }
   ];
@@ -271,6 +276,7 @@ function renderView() {
     project:    viewProjectDetail,
     activities: viewActivities,
     metrics:    viewMetrics,
+    practices:  viewPractices,
     team:       viewTeam,
     settings:   viewSettings
   };
@@ -2031,6 +2037,288 @@ function sprintSheet(sprint) {
         });
         app.sprintId = rec.id;
         closeSheet(); toast('Sprint guardado', 'ok'); renderView();
+      };
+    }
+  });
+}
+
+/* ==========================================================================
+   Vista: Prácticas
+   ========================================================================== */
+app.pracTab = 'diagnostico';   // diagnostico | biblioteca | ruta
+app.pracFw = '';               // filtro por marco
+
+/* El estado de adopción vive en las preferencias locales.
+   Cuando se agreguen registros de riesgos e interesados se migrará
+   a Firestore junto con el resto de la estructura. */
+const adopted = () => store.prefs.adoptedPractices || {};
+function toggleAdopt(id) {
+  const cur = { ...adopted() };
+  cur[id] = !cur[id];
+  store.savePrefs({ adoptedPractices: cur });
+}
+
+function viewPractices() {
+  const diag = diagnose(store);
+  const ad = adopted();
+  const nAdopted = PRACTICES.filter(p => ad[p.id]).length;
+
+  let content = '';
+  if (app.pracTab === 'diagnostico')      content = diagnosticoHtml(diag);
+  else if (app.pracTab === 'biblioteca')  content = bibliotecaHtml(ad);
+  else                                    content = rutaHtml(ad);
+
+  const body = `
+    <div class="page-head">
+      <h1>Prácticas</h1>
+      <p>Alinea tu forma de trabajar con marcos probados, a tu ritmo</p>
+    </div>
+
+    <div class="segmented mb-16">
+      <button class="${app.pracTab === 'diagnostico' ? 'active' : ''}" data-ptab="diagnostico">Diagnóstico</button>
+      <button class="${app.pracTab === 'biblioteca' ? 'active' : ''}" data-ptab="biblioteca">Biblioteca</button>
+      <button class="${app.pracTab === 'ruta' ? 'active' : ''}" data-ptab="ruta">Ruta</button>
+    </div>
+
+    ${content}`;
+
+  return {
+    toolbar: toolbar('Prácticas', `<span class="t-foot">${nAdopted}/${PRACTICES.length} adoptadas</span>`),
+    body,
+    mount(root) {
+      $$('[data-ptab]', root).forEach(b => b.onclick = () => { app.pracTab = b.dataset.ptab; renderView(); });
+      $$('[data-pfw]', root).forEach(b => b.onclick = () => {
+        app.pracFw = app.pracFw === b.dataset.pfw ? '' : b.dataset.pfw;
+        renderView();
+      });
+      $$('[data-practice]', root).forEach(b => b.onclick = (e) => {
+        if (e.target.closest('[data-adopt]')) return;
+        practiceSheet(b.dataset.practice);
+      });
+      $$('[data-adopt]', root).forEach(b => b.onclick = (e) => {
+        e.stopPropagation();
+        toggleAdopt(b.dataset.adopt);
+        renderView();
+      });
+      $$('[data-goto-practice]', root).forEach(b => b.onclick = () => practiceSheet(b.dataset.gotoPractice));
+    }
+  };
+}
+
+/* ---------- Pestaña: Diagnóstico ---------- */
+function diagnosticoHtml(diag) {
+  if (diag.empty) {
+    return `<div class="card">${empty('beaker', 'Aún no hay suficiente información',
+      'Crea algunas actividades y vuelve: el diagnóstico se calcula sobre tus datos reales, no sobre teoría.')}</div>`;
+  }
+
+  const sl = scoreLabel(diag.score);
+  const bySev = { alta: [], media: [], baja: [] };
+  diag.findings.forEach(f => bySev[f.sev].push(f));
+  const sevMeta = {
+    alta:  { label: 'Atender pronto', color: 'var(--red)',    badge: 'badge-red' },
+    media: { label: 'Conviene revisar', color: 'var(--orange)', badge: 'badge-orange' },
+    baja:  { label: 'Mejora menor',   color: 'var(--gray)',   badge: 'badge-gray' }
+  };
+
+  return `
+    <div class="card mb-16">
+      <div class="row g-20 wrap">
+        <div class="row g-16" style="flex:0 0 auto">
+          <div class="rel" style="width:96px;height:96px">
+            ${ring(diag.score / 100, 96, 8, sl.color)}
+            <div class="col center" style="position:absolute;inset:0">
+              <span style="font-size:26px;font-weight:700;letter-spacing:-.03em">${diag.score}</span>
+              <span class="t-cap">de 100</span>
+            </div>
+          </div>
+          <div class="col g-4">
+            <span class="t-title-3" style="color:${sl.color}">${sl.text}</span>
+            <span class="t-sub" style="max-width:230px">
+              ${diag.findings.length === 0
+                ? 'No se detectaron problemas en los 14 chequeos.'
+                : `${diag.findings.length} de ${diag.checks} chequeos encontraron algo.`}
+            </span>
+          </div>
+        </div>
+        <div class="grow" style="min-width:200px">
+          <p class="t-sub">Este puntaje se calcula con tus datos reales: fechas, responsables, tamaño
+          de las actividades, equilibrio de la matriz y cadencia. No mide cuánto trabajas,
+          mide qué tan predecible es tu forma de trabajar.</p>
+        </div>
+      </div>
+    </div>
+
+    ${diag.findings.length === 0
+      ? `<div class="card">${empty('check', 'Todo en orden',
+          'Ninguno de los chequeos encontró problemas. Mira la Ruta para el siguiente nivel.')}</div>`
+      : ['alta', 'media', 'baja'].filter(s => bySev[s].length).map(s => `
+        <div class="mb-16">
+          <div class="row g-8 mb-8" style="padding:0 4px">
+            <i class="dot dot-lg" style="background:${sevMeta[s].color}"></i>
+            <span class="t-head">${sevMeta[s].label}</span>
+            <span class="badge badge-gray">${bySev[s].length}</span>
+          </div>
+          <div class="col g-10">
+            ${bySev[s].map(f => findingCard(f, sevMeta[s])).join('')}
+          </div>
+        </div>`).join('')}`;
+}
+
+function findingCard(f, meta) {
+  const fw = FRAMEWORKS[f.framework];
+  const pr = practiceById(f.practice);
+  return `<div class="card" style="border-left:3px solid ${meta.color}">
+    <div class="row between g-12 mb-8">
+      <span class="t-title-3 grow">${esc(f.title)}</span>
+      <span class="badge" style="background:${fw.tint};color:${fw.color}">${fw.short}</span>
+    </div>
+    <div class="tl-note mb-8" style="margin-top:0"><b>Evidencia:</b> ${esc(f.evidence)}</div>
+    <p class="t-sub mb-8">${esc(f.meaning)}</p>
+    <div class="row between g-12 wrap">
+      <span class="t-body" style="flex:1;min-width:200px"><b>Qué hacer:</b> ${esc(f.action)}</span>
+      ${pr ? `<button class="btn btn-sm btn-tinted" data-goto-practice="${pr.id}">
+        ${icon('book', 14)} ${esc(pr.name)}</button>` : ''}
+    </div>
+  </div>`;
+}
+
+/* ---------- Pestaña: Biblioteca ---------- */
+function bibliotecaHtml(ad) {
+  const list = app.pracFw ? PRACTICES.filter(p => p.framework === app.pracFw) : PRACTICES;
+  const domains = [...new Set(list.map(p => p.domain))];
+
+  return `
+    <div class="row g-6 wrap mb-16">
+      <button class="chip ${!app.pracFw ? 'on' : ''}" data-pfw="">Todos</button>
+      ${Object.values(FRAMEWORKS).map(f => `
+        <button class="chip ${app.pracFw === f.id ? 'on' : ''}" data-pfw="${f.id}">
+          <i class="dot" style="background:${app.pracFw === f.id ? '#fff' : f.color}"></i>${f.name}
+        </button>`).join('')}
+    </div>
+
+    ${domains.map(d => `
+      <div class="mb-16">
+        <div class="section-label">${esc(d)}</div>
+        <div class="grid grid-2">
+          ${list.filter(p => p.domain === d).map(p => practiceCard(p, ad)).join('')}
+        </div>
+      </div>`).join('')}`;
+}
+
+function practiceCard(p, ad) {
+  const fw = FRAMEWORKS[p.framework];
+  const on = !!ad[p.id];
+  return `<div class="tile" data-practice="${p.id}" style="cursor:pointer">
+    <div class="row between g-8">
+      <span class="row g-6 wrap">
+        <span class="badge" style="background:${fw.tint};color:${fw.color}">${fw.short}</span>
+        <span class="badge badge-gray">Nivel ${p.level}</span>
+        ${p.planned ? `<span class="badge badge-purple">En el plan</span>` : ''}
+      </span>
+      <button class="icon-btn ${on ? 'accent' : ''}" data-adopt="${p.id}"
+        title="${on ? 'Adoptada' : 'Marcar como adoptada'}"
+        style="${on ? 'background:var(--green-t);color:var(--green)' : ''}">
+        ${icon('check', 16)}
+      </button>
+    </div>
+    <div>
+      <div class="tile-name">${esc(p.name)}</div>
+      <div class="t-sub mt-4">${esc(p.summary)}</div>
+    </div>
+  </div>`;
+}
+
+/* ---------- Pestaña: Ruta ---------- */
+function rutaHtml(ad) {
+  return `
+    <div class="banner banner-info mb-16">
+      ${icon('info', 17)}
+      <span>La ruta va de la higiene básica al rigor de proyectos complejos. No hace falta
+      completar un nivel para tocar el siguiente, pero saltarse el primero suele salir caro.</span>
+    </div>
+
+    ${Object.values(LEVELS).map(lv => {
+      const list = practicesByLevel(lv.id);
+      const done = list.filter(p => ad[p.id]).length;
+      const pct = Math.round(done / list.length * 100);
+      const color = lv.id === 1 ? 'var(--green)' : lv.id === 2 ? 'var(--blue)' : 'var(--purple)';
+      return `<div class="card mb-16">
+        <div class="row between g-12 mb-4">
+          <span class="row g-8">
+            <span class="tile-icon" style="background:${color};width:30px;height:30px;border-radius:9px;font-size:13px;font-weight:700">${lv.id}</span>
+            <span class="t-title-3">${esc(lv.name)}</span>
+          </span>
+          <span class="t-foot tnum">${done}/${list.length}</span>
+        </div>
+        <p class="t-sub mb-12">${esc(lv.hint)}</p>
+        <div class="progress mb-12"><i style="width:${pct}%;background:${color}"></i></div>
+        <div class="list">
+          ${list.map(p => {
+            const fw = FRAMEWORKS[p.framework];
+            const on = !!ad[p.id];
+            return `<div class="list-row" data-practice="${p.id}" style="cursor:pointer">
+              <button class="act-check ${on ? 'done' : ''}" data-adopt="${p.id}"
+                aria-label="Marcar como adoptada">${icon('check', 13)}</button>
+              <span class="col grow" style="align-items:flex-start;min-width:0;gap:1px">
+                <span style="font-size:14px;font-weight:500;${on ? 'color:var(--label-2)' : ''}">${esc(p.name)}</span>
+                <span class="t-foot truncate w-full" style="text-align:left">${esc(p.summary)}</span>
+              </span>
+              <span class="badge" style="background:${fw.tint};color:${fw.color}">${fw.short}</span>
+              ${icon('chevR', 14, 'chev')}
+            </div>`;
+          }).join('')}
+        </div>
+      </div>`;
+    }).join('')}`;
+}
+
+/* ---------- Detalle de una práctica ---------- */
+function practiceSheet(id) {
+  const p = practiceById(id);
+  if (!p) return;
+  const fw = FRAMEWORKS[p.framework];
+  const on = !!adopted()[p.id];
+
+  openSheet({
+    title: p.name,
+    size: 'lg',
+    body: `
+      <div class="row g-6 wrap mb-16">
+        <span class="badge" style="background:${fw.tint};color:${fw.color}">${fw.name}</span>
+        <span class="badge badge-gray">Nivel ${p.level} · ${esc(LEVELS[p.level].name)}</span>
+        <span class="badge badge-gray">${esc(p.domain)}</span>
+        ${p.inApp ? `<span class="badge badge-green">Ya soportado</span>` : ''}
+        ${p.planned ? `<span class="badge badge-purple">En el plan</span>` : ''}
+      </div>
+
+      <p class="t-body mb-16" style="font-size:16px;line-height:1.5">${esc(p.summary)}</p>
+
+      <div class="section-label">Por qué importa</div>
+      <p class="t-body mb-16" style="line-height:1.55">${esc(p.why)}</p>
+
+      <div class="section-label">Cómo aplicarlo hoy en PomoMomo</div>
+      <div class="tl-note mb-16" style="margin-top:0">${esc(p.how)}</div>
+
+      ${p.signals?.length ? `
+        <div class="section-label">Señales de que te hace falta</div>
+        <div class="list mb-16">
+          ${p.signals.map(s => `<div class="list-row">
+            ${icon('warning', 15)}<span class="grow t-sub">${esc(s)}</span>
+          </div>`).join('')}
+        </div>` : ''}`,
+    footer: `
+      <button class="btn btn-gray" data-x="c">Cerrar</button>
+      <button class="btn ${on ? 'btn-gray' : 'btn-primary'}" data-x="a">
+        ${icon('check', 15)} ${on ? 'Quitar de adoptadas' : 'Marcar como adoptada'}
+      </button>`,
+    onMount(el) {
+      $('[data-x="c"]', el).onclick = () => closeSheet();
+      $('[data-x="a"]', el).onclick = () => {
+        toggleAdopt(p.id);
+        closeSheet();
+        renderView();
+        toast(on ? 'Quitada de adoptadas' : 'Práctica adoptada', 'ok', 1600);
       };
     }
   });
