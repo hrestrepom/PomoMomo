@@ -452,7 +452,9 @@ export class Store extends Emitter {
       const { db, fsMod } = this._fb;
       const { doc, setDoc } = fsMod;
       const { id: _drop, ...payload } = rec;
-      await setDoc(doc(db, 'workspaces', WORKSPACE_ID, coll, id), payload, { merge: true });
+      try {
+        await setDoc(doc(db, 'workspaces', WORKSPACE_ID, coll, id), payload, { merge: true });
+      } catch (e) { throw Store.writeError(e, coll); }
     } else {
       const arr = this.data[coll];
       const i = arr.findIndex(x => x.id === id);
@@ -465,11 +467,44 @@ export class Store extends Emitter {
   async _del(coll, id) {
     if (this.mode === 'cloud') {
       const { db, fsMod } = this._fb;
-      await fsMod.deleteDoc(fsMod.doc(db, 'workspaces', WORKSPACE_ID, coll, id));
+      try {
+        await fsMod.deleteDoc(fsMod.doc(db, 'workspaces', WORKSPACE_ID, coll, id));
+      } catch (e) { throw Store.writeError(e, coll); }
     } else {
       this.data[coll] = this.data[coll].filter(x => x.id !== id);
       this._persistLocal();
     }
+  }
+
+  /**
+   * Convierte un error de Firestore en algo accionable.
+   * Sin esto, un rechazo de reglas deja los botones aparentemente muertos.
+   */
+  static writeError(e, coll) {
+    const code = e?.code || 'desconocido';
+    const NOMBRES = {
+      deliverables: 'entregables', activities: 'actividades', projects: 'proyectos',
+      portfolios: 'portafolios', sprints: 'sprints', history: 'historial', sessions: 'sesiones'
+    };
+    const nombre = NOMBRES[coll] || coll;
+
+    let friendly;
+    if (code === 'permission-denied') {
+      friendly = `Firestore rechazó la escritura en «${nombre}». Falta publicar la regla de esa colección en Firebase → Firestore → Reglas.`;
+    } else if (code === 'unavailable') {
+      friendly = 'Sin conexión con Firestore. El cambio se guardará al reconectar.';
+    } else if (code === 'unauthenticated') {
+      friendly = 'Tu sesión expiró. Vuelve a iniciar sesión.';
+    } else {
+      friendly = e?.message || 'No se pudo guardar el cambio.';
+    }
+
+    const err = e instanceof Error ? e : new Error(friendly);
+    err.code = code;
+    err.collection = coll;
+    err.friendly = friendly;
+    console.error(`[PomoMomo] Escritura en ${coll}:`, code, e);
+    return err;
   }
 
   /* ======================================================================
@@ -577,7 +612,7 @@ export class Store extends Emitter {
     const nueva = await this._put('activities', {
       name: a.name,
       projectId: a.projectId || '',
-      deliverableId: a.deliverableId || '',
+      deliverableIds: Store.deliverableIdsOf(a),
       assigneeUid: a.assigneeUid || '',
       quadrant: a.quadrant,
       status: 'todo',
@@ -620,8 +655,10 @@ export class Store extends Emitter {
 
   async deleteDeliverable(id) {
     // Las actividades vinculadas no se borran: solo pierden el vínculo
-    const acts = this.data.activities.filter(a => a.deliverableId === id);
-    for (const a of acts) await this._put('activities', { ...a, deliverableId: '' });
+    const acts = this.activitiesOfDeliverable(id);
+    for (const a of acts) {
+      await this._put('activities', { ...a, deliverableIds: Store.deliverableIdsOf(a).filter(x => x !== id) });
+    }
     await this._del('deliverables', id);
   }
 
@@ -633,9 +670,23 @@ export class Store extends Emitter {
     return this.data.deliverables.find(d => d.id === id) || null;
   }
 
+  /**
+   * Entregables de una actividad, siempre como lista.
+   * Acepta el campo antiguo `deliverableId` para no romper lo ya guardado.
+   */
+  static deliverableIdsOf(a) {
+    if (Array.isArray(a?.deliverableIds)) return a.deliverableIds.filter(Boolean);
+    return a?.deliverableId ? [a.deliverableId] : [];
+  }
+
   /** Actividades vinculadas a un entregable */
   activitiesOfDeliverable(id) {
-    return this.data.activities.filter(a => a.deliverableId === id);
+    return this.data.activities.filter(a => Store.deliverableIdsOf(a).includes(id));
+  }
+
+  /** Objetos de entregable vinculados a una actividad */
+  deliverablesOfActivity(a) {
+    return Store.deliverableIdsOf(a).map(id => this.deliverable(id)).filter(Boolean);
   }
 
   async setAssignee(id, assigneeUid) {

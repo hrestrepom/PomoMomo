@@ -123,6 +123,34 @@ function debounce(fn, ms) {
   let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
 }
 
+/**
+ * Ejecuta una operación de guardado mostrando el error si falla.
+ * Sin esto, un rechazo de Firestore deja el botón aparentemente muerto:
+ * la promesa se rechaza, la hoja no se cierra y no aparece ningún aviso.
+ * @returns {boolean} true si salió bien
+ */
+async function guardar(fn, { onError } = {}) {
+  try {
+    await fn();
+    return true;
+  } catch (e) {
+    const msg = e?.friendly || e?.message || 'No se pudo guardar el cambio.';
+    toast(msg, 'err', 6000);
+    onError?.(e);
+    return false;
+  }
+}
+
+/* Red de seguridad: cualquier fallo de escritura que no se haya capturado
+   explícitamente termina aquí en vez de morir en silencio en la consola. */
+window.addEventListener('unhandledrejection', (ev) => {
+  const e = ev.reason;
+  if (e?.friendly) {
+    toast(e.friendly, 'err', 6000);
+    ev.preventDefault();
+  }
+});
+
 /* ==========================================================================
    Render principal
    ========================================================================== */
@@ -494,7 +522,7 @@ function bindQuickAdd(root) {
     await store.saveActivity({
       name: r.name,
       projectId: r.projectId,
-      deliverableId: '',
+      deliverableIds: [],
       assigneeUid: store.user?.uid || '',
       quadrant: r.quadrant,
       status: 'todo',
@@ -1064,15 +1092,19 @@ function portfolioEditor(pf = null) {
     onMount(el) {
       bindSwatches(el); bindIconPicker(el);
       $('[data-x="c"]', el).onclick = () => closeSheet();
-      $('[data-x="s"]', el).onclick = async () => {
+      $('[data-x="s"]', el).onclick = async (ev) => {
         const name = $('#pf-name', el).value.trim();
         if (!name) return toast('Escribe un nombre', 'err');
-        await store.savePortfolio({
+        const btn = ev.currentTarget;
+        btn.disabled = true;
+        const ok = await guardar(() => store.savePortfolio({
           ...(pf?.id ? { id: pf.id, createdAt: pf.createdAt } : {}),
           name, desc: $('#pf-desc', el).value.trim(),
           color: $('.sw.on', el)?.dataset.color || cur.color,
           icon: $('.ip.on', el)?.dataset.icon || cur.icon
-        });
+        }));
+        btn.disabled = false;
+        if (!ok) return;
         closeSheet(); toast(isNew ? 'Portafolio creado' : 'Guardado', 'ok');
       };
     }
@@ -1315,7 +1347,7 @@ function bindDeliverables(root, projectId) {
       { label: d.achieved ? 'Quitar logro' : 'Marcar como logrado', icon: 'check',
         onClick: () => store.achieveDeliverable(d.id, !d.achieved) },
       { label: 'Nueva actividad para esto', icon: 'plus',
-        onClick: () => activityEditor({ projectId: d.projectId, deliverableId: d.id }) },
+        onClick: () => activityEditor({ projectId: d.projectId, deliverableIds: [d.id] }) },
       '-',
       { label: 'Eliminar', icon: 'trash', danger: true, onClick: async () => {
         const n = store.activitiesOfDeliverable(d.id).length;
@@ -1351,16 +1383,21 @@ function deliverableEditor(d = null) {
              <button class="btn btn-primary" data-x="s">${isNew ? 'Crear' : 'Guardar'}</button>`,
     onMount(el) {
       $('[data-x="c"]', el).onclick = () => closeSheet();
-      $('[data-x="s"]', el).onclick = async () => {
+      $('[data-x="s"]', el).onclick = async (ev) => {
         const name = $('#dl-name', el).value.trim();
         if (!name) return toast('Escribe el entregable', 'err');
-        await store.saveDeliverable({
+
+        const btn = ev.currentTarget;
+        btn.disabled = true;
+        const ok = await guardar(() => store.saveDeliverable({
           ...(d?.id ? { id: d.id, createdAt: d.createdAt, achieved: d.achieved, achievedAt: d.achievedAt } : {}),
           projectId: cur.projectId,
           name,
           desc: $('#dl-desc', el).value.trim(),
           targetDate: $('#dl-date', el).value
-        });
+        }));
+        btn.disabled = false;
+        if (!ok) return;   // se mantiene abierta para no perder lo escrito
         closeSheet();
         toast(isNew ? 'Entregable creado' : 'Guardado', 'ok');
       };
@@ -1396,10 +1433,12 @@ function projectEditor(pr = null) {
     onMount(el) {
       bindSwatches(el); bindIconPicker(el);
       $('[data-x="c"]', el).onclick = () => closeSheet();
-      $('[data-x="s"]', el).onclick = async () => {
+      $('[data-x="s"]', el).onclick = async (ev) => {
         const name = $('#pr-name', el).value.trim();
         if (!name) return toast('Escribe un nombre', 'err');
-        await store.saveProject({
+        const btn = ev.currentTarget;
+        btn.disabled = true;
+        const ok = await guardar(() => store.saveProject({
           ...(pr?.id ? { id: pr.id, createdAt: pr.createdAt } : {}),
           name,
           portfolioId: $('#pr-pf', el).value,
@@ -1409,7 +1448,9 @@ function projectEditor(pr = null) {
           color: $('.sw.on', el)?.dataset.color || cur.color,
           icon: $('.ip.on', el)?.dataset.icon || cur.icon,
           status: cur.status || 'active'
-        });
+        }));
+        btn.disabled = false;
+        if (!ok) return;
         closeSheet(); toast(isNew ? 'Proyecto creado' : 'Guardado', 'ok');
       };
     }
@@ -1669,7 +1710,7 @@ function bindKanban(root) {
 function activityEditor(a = null) {
   const isNew = !a?.id;
   const cur = {
-    name: '', projectId: '', deliverableId: '', assigneeUid: store.user?.uid || '', quadrant: 'Q2',
+    name: '', projectId: '', deliverableIds: [], assigneeUid: store.user?.uid || '', quadrant: 'Q2',
     status: 'todo', points: 3, pomosEstimated: 2, dueDate: '', notes: '', recur: null, ...a
   };
   const pfs = store.data.portfolios;
@@ -1735,8 +1776,8 @@ function activityEditor(a = null) {
       </div>
 
       <div class="field mt-16" id="a-deliv-wrap">
-        <label>Entregable <span class="muted-2">(opcional)</span></label>
-        <select class="select" id="a-deliverable"></select>
+        <label>Entregables a los que contribuye <span class="muted-2">(opcional)</span></label>
+        <div id="a-deliverables"></div>
       </div>
 
       <div class="field mt-16"><label>Notas</label>
@@ -1750,22 +1791,35 @@ function activityEditor(a = null) {
         $$('[data-q]', el).forEach(x => x.classList.toggle('on', x === b));
       });
 
-      /* El selector de entregables depende del proyecto elegido */
+      /* Una actividad puede contribuir a varios entregables del proyecto */
       const projSel = $('#a-project', el);
-      const delivSel = $('#a-deliverable', el);
+      const delivBox = $('#a-deliverables', el);
       const delivWrap = $('#a-deliv-wrap', el);
+      let seleccion = new Set(Store.deliverableIdsOf(cur));
+
       const fillDeliverables = () => {
         const list = store.deliverablesOf(projSel.value);
         delivWrap.classList.toggle('hidden', !projSel.value || !list.length);
-        delivSel.innerHTML = `<option value="">Sin entregable</option>` +
-          list.map(d => `<option value="${d.id}" ${cur.deliverableId === d.id ? 'selected' : ''}>
-            ${d.achieved ? '✓ ' : ''}${esc(d.name)}</option>`).join('');
+        if (!list.length) return;
+        // Al cambiar de proyecto se descartan los que ya no aplican
+        seleccion = new Set([...seleccion].filter(id => list.some(d => d.id === id)));
+        delivBox.innerHTML = `<div class="list">${list.map(d => `
+          <button type="button" class="list-row" data-dl="${d.id}">
+            <span class="act-check ${seleccion.has(d.id) ? 'done' : ''}">${icon('check', 13)}</span>
+            <span class="grow truncate" style="text-align:left;font-size:14px">${esc(d.name)}</span>
+            ${d.achieved ? `<span class="badge badge-green">Logrado</span>` : ''}
+          </button>`).join('')}</div>`;
+        $$('[data-dl]', delivBox).forEach(b => b.onclick = () => {
+          const id = b.dataset.dl;
+          seleccion.has(id) ? seleccion.delete(id) : seleccion.add(id);
+          $('.act-check', b).classList.toggle('done', seleccion.has(id));
+        });
       };
       fillDeliverables();
       projSel.addEventListener('change', fillDeliverables);
 
       $('[data-x="c"]', el).onclick = () => closeSheet();
-      $('[data-x="s"]', el).onclick = async () => {
+      $('[data-x="s"]', el).onclick = async (ev) => {
         const name = $('#a-name', el).value.trim();
         if (!name) return toast('Escribe el nombre de la actividad', 'err');
         const status = $('#a-status', el).value;
@@ -1775,11 +1829,13 @@ function activityEditor(a = null) {
           ? withAnchor({ ...(cur.recur || {}), freq, interval: cur.recur?.interval || 1 }, due)
           : null;
 
-        await store.saveActivity({
+        const btn = ev.currentTarget;
+        btn.disabled = true;
+        const ok = await guardar(() => store.saveActivity({
           ...(a?.id ? { id: a.id, createdAt: a.createdAt, completedAt: a.completedAt } : {}),
           name,
           projectId: projSel.value,
-          deliverableId: delivWrap.classList.contains('hidden') ? '' : delivSel.value,
+          deliverableIds: [...seleccion],
           assigneeUid: $('#a-assignee', el).value,
           quadrant: quad,
           status,
@@ -1789,7 +1845,9 @@ function activityEditor(a = null) {
           notes: $('#a-notes', el).value.trim(),
           recur,
           completedAt: status === 'done' ? (a?.completedAt || nowISO()) : null
-        });
+        }));
+        btn.disabled = false;
+        if (!ok) return;                       // la hoja sigue abierta con los datos
         closeSheet();
         toast(isNew ? 'Actividad creada' : 'Cambios guardados', 'ok');
       };
@@ -1841,6 +1899,20 @@ function activityDetail(id) {
             </span>
           </div>` : ''}
         </div>
+
+        ${(() => {
+          const dels = store.deliverablesOfActivity(a);
+          if (!dels.length) return '';
+          return `<div>
+            <div class="section-label">Contribuye a</div>
+            <div class="list">${dels.map(d => `
+              <div class="list-row">
+                <span class="act-check ${d.achieved ? 'done' : ''}" style="pointer-events:none">${icon('check', 13)}</span>
+                <span class="grow truncate">${esc(d.name)}</span>
+                ${d.achieved ? `<span class="badge badge-green">${fmtDate(d.achievedAt)}</span>` : ''}
+              </div>`).join('')}</div>
+          </div>`;
+        })()}
 
         ${a.notes ? `<div><div class="section-label">Notas</div><div class="tl-note" style="margin-top:0">${esc(a.notes)}</div></div>` : ''}
 
