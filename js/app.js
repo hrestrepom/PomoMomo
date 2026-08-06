@@ -2239,11 +2239,49 @@ function signInErrorHtml(e) {
 }
 
 function noAccessView() {
-  return `<div class="signin"><div class="signin-card">
+  const err = store.accessError;
+  const trace = store.accessTrace || [];
+  const esPermiso = err && /permission|insufficient/i.test(err.code + ' ' + err.message);
+
+  return `<div class="signin"><div class="signin-card" style="max-width:460px">
     <div class="signin-mark" style="background:linear-gradient(150deg,#FFB340,#FF9500)">${icon('warning', 28)}</div>
     <h1 class="t-title mb-8">Sin acceso</h1>
-    <p class="t-sub mb-24">La cuenta <b>${esc(store.user?.email || '')}</b> no está invitada a este espacio de trabajo.
-      Pide al propietario que te invite desde <b>Equipo</b>.</p>
+
+    <p class="t-sub mb-16">La cuenta <b>${esc(store.user?.email || '')}</b> no pudo entrar a este espacio.</p>
+
+    ${err ? `
+      <div class="banner banner-warn mb-16" style="text-align:left;align-items:flex-start">
+        ${icon('info', 17)}
+        <span class="col g-4 grow">
+          <span><b>Falló en:</b> ${esc(err.paso)}</span>
+          <span>${esc(err.message)}</span>
+          <span class="t-cap" style="color:inherit;opacity:.75">Código: ${esc(err.code)}</span>
+        </span>
+      </div>
+
+      ${esPermiso ? `
+        <div class="banner banner-info mb-16" style="text-align:left">
+          ${icon('warning', 17)}
+          <span>Las reglas de Firestore están rechazando la lectura. Verifica que hayas
+          pegado el contenido de <b>firestore.rules</b> en Firebase → Firestore Database →
+          pestaña <b>Reglas</b>, y que le hayas dado <b>Publicar</b>.</span>
+        </div>` : ''}
+
+      ${err.code === 'sin-invitacion' ? `
+        <div class="banner banner-info mb-16" style="text-align:left">
+          ${icon('info', 17)}
+          <span>El espacio ya tiene miembros registrados. Pide al propietario que te
+          invite desde <b>Equipo → Invitar</b>.</span>
+        </div>` : ''}
+    ` : ''}
+
+    ${trace.length ? `
+      <details style="text-align:left;margin-bottom:16px">
+        <summary class="t-foot" style="cursor:pointer">Ver detalle técnico</summary>
+        <div class="tl-note" style="margin-top:8px;font-size:12px">${trace.map(esc).join('\n')}</div>
+      </details>` : ''}
+
+    <button class="btn btn-primary btn-block mb-8" id="btn-retry">${icon('reset', 15)} Reintentar</button>
     <button class="btn btn-gray btn-block" id="btn-signout">Usar otra cuenta</button>
   </div></div>`;
 }
@@ -2280,6 +2318,7 @@ function bindSignIn() {
   $('#btn-google')?.addEventListener('click', (ev) => attempt(ev.currentTarget, 'popup'));
   $('#btn-redirect')?.addEventListener('click', (ev) => attempt(ev.currentTarget, 'redirect'));
   $('#btn-signout')?.addEventListener('click', () => store.signOut());
+  $('#btn-retry')?.addEventListener('click', () => location.reload());
 }
 
 /* ==========================================================================

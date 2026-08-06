@@ -145,28 +145,49 @@ export class Store extends Emitter {
     this._fb = { app, auth, db, authMod, fsMod };
     this.mode = 'cloud';
 
-    /* Si volvemos de un signInWithRedirect, aquí aparece el error.
-       Sin esto, un fallo en la redirección es invisible: el usuario
-       vuelve a la pantalla de acceso sin explicación. */
+    /* Recoge el resultado de un signInWithRedirect SIN bloquear el arranque.
+       Si se espera con await antes de registrar onAuthStateChanged y la
+       promesa no resuelve, la app se queda colgada en la pantalla de carga. */
     const veniaDeRedirect = sessionStorage.getItem('pomomomo.redirecting') === '1';
     sessionStorage.removeItem('pomomomo.redirecting');
-    try {
-      await authMod.getRedirectResult(auth);
-    } catch (e) {
+
+    authMod.getRedirectResult(auth)
+      .then(() => {
+        if (veniaDeRedirect && !auth.currentUser) {
+          this.authError = {
+            code: 'auth/redirect-sin-sesion',
+            message: 'La redirección volvió sin sesión. Suele pasar cuando el navegador bloquea cookies de terceros: prueba con la ventana emergente o permite cookies para este sitio.'
+          };
+          this.emit('auth', this);
+        }
+      })
+      .catch((e) => {
+        this.authError = {
+          code: e?.code || 'desconocido',
+          message: Store.authMessage(e?.code) || e?.message || 'Falló el acceso por redirección.'
+        };
+        console.error('[PomoMomo] Redirect:', e);
+        this.emit('auth', this);
+      });
+
+    /* Red de seguridad: si en 12 s no hubo respuesta de Firebase, se muestra
+       la pantalla de acceso con el aviso en vez de dejar el spinner eterno. */
+    const watchdog = setTimeout(() => {
+      if (this.ready) return;
+      this.authState = 'signed-out';
+      this.ready = true;
       this.authError = {
-        code: e?.code || 'desconocido',
-        message: Store.authMessage(e?.code) || e?.message || 'Falló el acceso por redirección.'
+        code: 'sin-respuesta',
+        message: 'Firebase no respondió a tiempo. Revisa tu conexión y vuelve a intentarlo.'
       };
-      console.error('[PomoMomo] Redirect:', e);
-    }
-    if (veniaDeRedirect && !auth.currentUser && !this.authError) {
-      this.authError = {
-        code: 'auth/redirect-sin-sesion',
-        message: 'La redirección volvió sin sesión. Suele pasar cuando el navegador bloquea cookies de terceros: prueba con la ventana emergente o desactiva el bloqueo para este sitio.'
-      };
-    }
+      console.warn('[PomoMomo] Watchdog: Firebase no respondió en 12 s');
+      this.emit('auth', this);
+      this.emit('ready', this);
+    }, 12000);
+    this._watchdog = watchdog;
 
     authMod.onAuthStateChanged(auth, async (u) => {
+      clearTimeout(this._watchdog);
       this._teardownListeners();
       if (!u) {
         this.user = null;
@@ -201,48 +222,91 @@ export class Store extends Emitter {
   /* Crea el doc de miembro si el usuario está invitado o es el primero (bootstrap) */
   async _ensureMembership() {
     const { db, fsMod } = this._fb;
-    const { doc, getDoc, setDoc, serverTimestamp, collection, getDocs, limit, query, deleteDoc } = fsMod;
+    const { doc, getDoc, serverTimestamp, collection, getDocs, limit, query, deleteDoc, writeBatch } = fsMod;
     const wsRef = doc(db, 'workspaces', WORKSPACE_ID);
     const meRef = doc(db, 'workspaces', WORKSPACE_ID, 'members', this.user.uid);
 
+    const email = (this.user.email || '').toLowerCase();
+    const invRef = doc(db, 'workspaces', WORKSPACE_ID, 'invites', email);
+
+    /* Cada paso se registra para poder mostrar en pantalla DONDE falló.
+       Antes cualquier error devolvia false y el usuario solo veia
+       "Sin acceso" sin ninguna pista de la causa. */
+    this.accessTrace = [];
+    const paso = (nombre, detalle) => {
+      this.accessTrace.push(`${nombre}: ${detalle}`);
+      console.info('[PomoMomo] membresía →', nombre, detalle);
+    };
+    const fallo = (nombre, e) => {
+      const code = e?.code || 'desconocido';
+      this.accessError = { paso: nombre, code, message: e?.message || String(e) };
+      this.accessTrace.push(`${nombre}: ERROR ${code}`);
+      console.error('[PomoMomo] membresía ✗', nombre, e);
+      return false;
+    };
+
+    this.accessError = null;
+
+    // 1) ¿Ya soy miembro?
+    let me;
     try {
-      const me = await getDoc(meRef);
-      if (me.exists()) return true;
+      me = await getDoc(meRef);
+      paso('leer mi ficha de miembro', me.exists() ? 'ya existe' : 'no existe todavía');
+    } catch (e) { return fallo('leer mi ficha de miembro', e); }
+    if (me.exists()) return true;
 
-      // ¿Hay invitación para este correo?
-      const invRef = doc(db, 'workspaces', WORKSPACE_ID, 'invites', (this.user.email || '').toLowerCase());
-      const inv = await getDoc(invRef);
+    // 2) ¿Tengo invitación?
+    let inv = null;
+    try {
+      inv = await getDoc(invRef);
+      paso('buscar invitación', inv.exists() ? 'encontrada' : 'sin invitación');
+    } catch (e) { return fallo('buscar invitación', e); }
 
-      // ¿El espacio está vacío? El primero en entrar se vuelve owner.
-      let isFirst = false;
-      if (!inv.exists()) {
-        try {
-          const snap = await getDocs(query(collection(db, 'workspaces', WORKSPACE_ID, 'members'), limit(1)));
-          isFirst = snap.empty;
-        } catch { isFirst = false; }
-      }
+    // 3) ¿El espacio está sin dueño? El primero en entrar se vuelve propietario.
+    let isFirst = false;
+    if (!inv.exists()) {
+      try {
+        const snap = await getDocs(query(collection(db, 'workspaces', WORKSPACE_ID, 'members'), limit(1)));
+        isFirst = snap.empty;
+        paso('revisar si el espacio está vacío', isFirst ? 'vacío → serás propietario' : 'ya tiene miembros');
+      } catch (e) { return fallo('revisar si el espacio está vacío', e); }
+    }
 
-      if (!inv.exists() && !isFirst) return false;
+    if (!inv.exists() && !isFirst) {
+      this.accessError = {
+        paso: 'autorización',
+        code: 'sin-invitacion',
+        message: 'El espacio ya tiene miembros y esta cuenta no tiene invitación.'
+      };
+      return false;
+    }
 
-      await setDoc(meRef, {
+    // 4) Alta atómica: ficha de miembro + documento del espacio en un solo lote.
+    //    Si se hicieran por separado y fallara el segundo, el espacio quedaría
+    //    "reclamado" sin propietario y nadie podría volver a entrar.
+    try {
+      const batch = writeBatch(db);
+      batch.set(meRef, {
         uid: this.user.uid,
         displayName: this.user.displayName || '',
-        email: (this.user.email || '').toLowerCase(),
+        email,
         photoURL: this.user.photoURL || '',
         role: isFirst ? 'owner' : (inv.data()?.role || 'member'),
         joinedAt: serverTimestamp()
       });
-
       if (isFirst) {
-        try { await setDoc(wsRef, { name: 'Espacio principal', ownerUid: this.user.uid, createdAt: serverTimestamp() }, { merge: true }); }
-        catch { /* opcional */ }
+        batch.set(wsRef, {
+          name: 'Espacio principal',
+          ownerUid: this.user.uid,
+          createdAt: serverTimestamp()
+        }, { merge: true });
       }
-      if (inv.exists()) { try { await deleteDoc(invRef); } catch { /* opcional */ } }
-      return true;
-    } catch (e) {
-      console.error('[PomoMomo] membresía:', e);
-      return false;
-    }
+      await batch.commit();
+      paso('registrar acceso', isFirst ? 'creado como propietario' : 'creado como miembro');
+    } catch (e) { return fallo('registrar acceso', e); }
+
+    if (inv?.exists()) { try { await deleteDoc(invRef); } catch { /* la invitación sobrante no estorba */ } }
+    return true;
   }
 
   _resetData() {
