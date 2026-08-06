@@ -1232,6 +1232,8 @@ function viewProjectDetail({ id }) {
       </div>
     </div>` : ''}
 
+    ${sprintsSection(pr)}
+
     ${deliverablesSection(pr)}
 
     <div class="row between mb-8" style="padding:0 4px">
@@ -1259,10 +1261,61 @@ function viewProjectDetail({ id }) {
     mount(root) {
       $('[data-edit-pr]')?.addEventListener('click', () => projectEditor(pr));
       $$('[data-new-activity]').forEach(b => b.onclick = () => activityEditor({ projectId: id }));
+      $$('[data-new-sprint]', root).forEach(b => b.onclick = () => sprintSheet(null, { projectId: id }));
+      $$('[data-open-sprint]', root).forEach(b => b.onclick = () => {
+        app.sprintId = b.dataset.openSprint;
+        go('metrics');
+      });
       bindDeliverables(root, id);
       bindActivityRows(root);
     }
   };
+}
+
+/* ==========================================================================
+   Sprints de un proyecto
+   ========================================================================== */
+function sprintsSection(pr) {
+  const hoy = todayISO();
+  const list = store.data.sprints
+    .filter(s => s.projectId === pr.id)
+    .sort((a, b) => (b.start || '').localeCompare(a.start || ''));
+
+  if (!list.length) {
+    return `<div class="row between mb-16" style="padding:0 4px">
+      <span class="t-sub">${icon('timer', 14)} Sin sprints en este proyecto</span>
+      <button class="btn btn-sm btn-gray" data-new-sprint>${icon('plus', 14)} Nuevo sprint</button>
+    </div>`;
+  }
+
+  return `
+    <div class="row between mb-8" style="padding:0 4px">
+      <span class="row g-8"><span class="t-head">Sprints</span>
+        <span class="badge badge-gray">${list.length}</span></span>
+      <button class="btn btn-sm btn-tinted" data-new-sprint>${icon('plus', 14)} Nuevo</button>
+    </div>
+    <div class="list mb-24">
+      ${list.map(s => {
+        const vigente = s.start <= hoy && s.end >= hoy;
+        const acts = sprintActivities(s, store.activitiesOf(pr.id));
+        const st = Stats(acts);
+        const dias = vigente ? daysBetween(hoy, s.end) : null;
+        return `<button class="list-row" data-open-sprint="${s.id}">
+          <span class="col grow" style="align-items:flex-start;min-width:0;gap:3px">
+            <span class="row g-6">
+              <span style="font-size:14.5px;font-weight:550">${esc(s.name)}</span>
+              ${vigente ? `<span class="badge badge-green">En curso · ${dias} d</span>`
+                : s.end < hoy ? `<span class="badge badge-gray">Cerrado</span>`
+                : `<span class="badge badge-blue">Próximo</span>`}
+            </span>
+            <span class="t-foot">${fmtDate(s.start)} → ${fmtDate(s.end)} · ${acts.length} actividades · ${st.donePoints}/${st.points} pts</span>
+            <span class="progress w-full" style="max-width:240px"><i style="width:${st.pctPoints}%;background:${vigente ? 'var(--green)' : 'var(--gray)'}"></i></span>
+          </span>
+          <span class="t-foot tnum">${st.pctPoints}%</span>
+          ${icon('chevR', 14, 'chev')}
+        </button>`;
+      }).join('')}
+    </div>`;
 }
 
 /* ==========================================================================
@@ -2192,15 +2245,20 @@ function viewMetrics() {
     <div class="grid grid-2 mb-16">
       <div class="card">
         <div class="card-head">
-          <span class="card-title">Burndown ${sprint ? '· ' + esc(sprint.name) : ''}</span>
+          <span class="card-title">Burndown</span>
           <div class="row g-6">
-            ${sprints.length > 1 ? `<select class="select" id="m-sprint" style="width:auto;height:28px;padding-block:0;font-size:12px">
+            ${sprints.length ? `<select class="select" id="m-sprint" style="width:auto;max-width:170px;height:28px;padding-block:0;font-size:12px">
               ${sprints.map(s => `<option value="${s.id}" ${sprint?.id === s.id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}
             </select>` : ''}
-            <button class="icon-btn" id="m-sprint-edit" aria-label="Configurar sprint">${icon('gear', 16)}</button>
+            ${sprint ? `<button class="icon-btn" id="m-sprint-edit" aria-label="Configurar este sprint">${icon('gear', 16)}</button>` : ''}
+            <button class="icon-btn accent" id="m-sprint-new" aria-label="Nuevo sprint" title="Nuevo sprint">${icon('plus', 17)}</button>
           </div>
         </div>
         ${sprint ? `
+          <div class="row g-6 wrap mb-8">
+            <span class="badge badge-gray">${icon('calendar', 11)} ${fmtDate(sprint.start)} → ${fmtDate(sprint.end)}</span>
+            <span class="badge badge-blue">${icon('target', 11)} ${esc(sprintScopeLabel(sprint))}</span>
+          </div>
           <div class="chart-box"><canvas id="c-burndown"></canvas></div>
           <div class="legend mt-8">
             <span class="legend-item"><i class="legend-swatch" style="background:var(--gray)"></i>Ideal</span>
@@ -2217,8 +2275,9 @@ function viewMetrics() {
             <span class="t-foot">Días restantes: <b class="tnum">${bd.daysLeft}</b></span>
             <span class="t-foot">Proyección: <b>${bd.forecast}</b></span>
           </div>`
-          : empty('chart', 'Sin sprint definido', 'Crea un sprint para ver el burndown.',
-            `<button class="btn btn-tinted mt-8" id="m-sprint-new">${icon('plus', 15)} Crear sprint</button>`)}
+          : empty('chart', 'Sin sprint definido',
+              'Un sprint es un periodo con fechas. Puedes acotarlo a un proyecto o elegir actividades concretas.',
+              `<button class="btn btn-primary mt-8" id="m-sprint-new2">${icon('plus', 15)} Crear sprint</button>`)}
       </div>
 
       <div class="card">
@@ -2305,7 +2364,7 @@ function viewMetrics() {
       $('#m-scope', root).onchange = (e) => { app.metricScope = e.target.value; renderView(); };
       $('#m-sprint', root)?.addEventListener('change', (e) => { app.sprintId = e.target.value; renderView(); });
       $('#m-sprint-edit', root)?.addEventListener('click', () => sprintSheet(sprint));
-      $('#m-sprint-new', root)?.addEventListener('click', () => sprintSheet(null));
+      $$('#m-sprint-new, #m-sprint-new2', root).forEach(b => b.onclick = () => sprintSheet(null));
 
       const dayLabels = days14.map(d => d.slice(8) + '/' + d.slice(5, 7));
 
@@ -2332,16 +2391,40 @@ function viewMetrics() {
   };
 }
 
+/**
+ * Actividades que cuentan para un sprint.
+ * Prioridad: selección explícita → proyecto del sprint → alcance de la vista.
+ */
+function sprintActivities(sprint, fallbackActs) {
+  if (!sprint) return [];
+  if (sprint.activityIds?.length) {
+    return sprint.activityIds.map(id => store.activity(id)).filter(Boolean);
+  }
+  if (sprint.projectId) return store.activitiesOf(sprint.projectId);
+  return fallbackActs;
+}
+
+/** Texto legible del alcance de un sprint */
+function sprintScopeLabel(sprint) {
+  if (!sprint) return '';
+  if (sprint.activityIds?.length) return `${sprint.activityIds.length} actividades elegidas`;
+  if (sprint.projectId) return store.project(sprint.projectId)?.name || 'Proyecto eliminado';
+  return 'Todo el espacio';
+}
+
 /* ---------- Cálculo del burndown ---------- */
-function buildBurndown(acts, sprint) {
+function buildBurndown(fallbackActs, sprint) {
   const today = todayISO();
   if (!sprint) return { chart: { labels: [], ideal: [], actual: [], todayIdx: -1 }, remaining: 0, velocity: 0, daysLeft: 0, delta: 0, status: 'ok', forecast: '—' };
 
+  const acts = sprintActivities(sprint, fallbackActs);
   const start = sprint.start, end = sprint.end;
   const n = Math.max(1, daysBetween(start, end)) + 1;
   const days = Array.from({ length: n }, (_, i) => addDays(start, i));
 
-  const inSprint = acts.filter(a => {
+  /* Con selección explícita se respeta tal cual; si no, se descartan las
+     creadas después del cierre del sprint. */
+  const inSprint = sprint.activityIds?.length ? acts : acts.filter(a => {
     const created = a.createdAt ? dayKey(a.createdAt) : start;
     return created <= end;
   });
@@ -2383,38 +2466,139 @@ function buildBurndown(acts, sprint) {
   };
 }
 
-function sprintSheet(sprint) {
+function sprintSheet(sprint, preset = {}) {
   const isNew = !sprint?.id;
-  const cur = { name: `Sprint ${store.data.sprints.length + 1}`, start: todayISO(), end: addDays(todayISO(), 13), ...sprint };
+  const cur = {
+    name: `Sprint ${store.data.sprints.length + 1}`,
+    start: todayISO(), end: addDays(todayISO(), 13),
+    projectId: '', activityIds: [],
+    ...preset, ...sprint
+  };
+
+  const pfs = store.data.portfolios;
+  const sueltos = store.data.projects.filter(p => !p.portfolioId);
 
   openSheet({
     title: isNew ? 'Nuevo sprint' : 'Configurar sprint',
+    size: 'lg',
     body: `
-      <div class="field"><label>Nombre</label><input class="input" id="sp-name" value="${esc(cur.name)}"></div>
+      <div class="field"><label>Nombre</label>
+        <input class="input" id="sp-name" value="${esc(cur.name)}" placeholder="Ej. Semana del 10"></div>
+
       <div class="grid grid-2 mt-16" style="gap:12px">
         <div class="field"><label>Inicio</label><input class="input" type="date" id="sp-start" value="${cur.start}"></div>
         <div class="field"><label>Fin</label><input class="input" type="date" id="sp-end" value="${cur.end}"></div>
+      </div>
+
+      <div class="field mt-16"><label>Alcance</label>
+        <select class="select" id="sp-project">
+          <option value="">Todo el espacio</option>
+          ${pfs.map(pf => {
+            const list = store.projectsOf(pf.id);
+            return list.length ? `<optgroup label="${esc(pf.name)}">
+              ${list.map(p => `<option value="${p.id}" ${cur.projectId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+            </optgroup>` : '';
+          }).join('')}
+          ${sueltos.length ? `<optgroup label="Sin portafolio">
+            ${sueltos.map(p => `<option value="${p.id}" ${cur.projectId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+          </optgroup>` : ''}
+        </select></div>
+
+      <div class="field mt-16">
+        <div class="row between">
+          <label style="margin:0">Actividades incluidas</label>
+          <span class="row g-6">
+            <button type="button" class="btn btn-sm btn-gray" id="sp-none">Ninguna</button>
+            <button type="button" class="btn btn-sm btn-gray" id="sp-all">Todas</button>
+          </span>
+        </div>
+        <p class="t-foot mt-4" id="sp-hint"></p>
+        <div id="sp-acts" style="max-height:260px;overflow-y:auto"></div>
       </div>`,
     footer: `${!isNew ? `<button class="btn btn-danger" data-x="d">Eliminar</button>` : ''}
              <button class="btn btn-gray" data-x="c">Cancelar</button>
              <button class="btn btn-primary" data-x="s">${isNew ? 'Crear' : 'Guardar'}</button>`,
     onMount(el) {
+      const projSel = $('#sp-project', el);
+      const box = $('#sp-acts', el);
+      const hint = $('#sp-hint', el);
+      let seleccion = new Set(cur.activityIds || []);
+
+      const candidatas = () => {
+        const pid = projSel.value;
+        return store.data.activities.filter(a => (!pid || a.projectId === pid) && a.status !== 'done');
+      };
+
+      const pintar = () => {
+        const list = candidatas();
+        hint.textContent = seleccion.size
+          ? `${seleccion.size} seleccionada(s). El burndown contará solo estas.`
+          : 'Ninguna marcada: el burndown incluirá todas las del alcance.';
+        if (!list.length) {
+          box.innerHTML = `<p class="t-sub">No hay actividades abiertas en este alcance.</p>`;
+          return;
+        }
+        box.innerHTML = `<div class="list">${list.map(a => {
+          const pr = store.project(a.projectId);
+          return `<button type="button" class="list-row" data-sa="${a.id}">
+            <span class="act-check ${seleccion.has(a.id) ? 'done' : ''}">${icon('check', 13)}</span>
+            <span class="col grow" style="align-items:flex-start;min-width:0;gap:1px">
+              <span class="truncate w-full" style="text-align:left;font-size:14px">${esc(a.name)}</span>
+              <span class="t-foot truncate w-full" style="text-align:left">
+                ${pr ? esc(pr.name) : 'Sin proyecto'}${a.dueDate ? ' · ' + fmtDue(a.dueDate) : ''}
+              </span>
+            </span>
+            <span class="badge badge-${a.quadrant.toLowerCase()}">${a.quadrant}</span>
+            ${a.points ? `<span class="t-cap tnum">${a.points}p</span>` : ''}
+          </button>`;
+        }).join('')}</div>`;
+        $$('[data-sa]', box).forEach(b => b.onclick = () => {
+          const id = b.dataset.sa;
+          seleccion.has(id) ? seleccion.delete(id) : seleccion.add(id);
+          $('.act-check', b).classList.toggle('done', seleccion.has(id));
+          hint.textContent = seleccion.size
+            ? `${seleccion.size} seleccionada(s). El burndown contará solo estas.`
+            : 'Ninguna marcada: el burndown incluirá todas las del alcance.';
+        });
+      };
+
+      pintar();
+      projSel.addEventListener('change', () => {
+        // Al cambiar de alcance se descartan las que ya no aplican
+        const validas = new Set(candidatas().map(a => a.id));
+        seleccion = new Set([...seleccion].filter(id => validas.has(id)));
+        pintar();
+      });
+      $('#sp-all', el).onclick = () => { seleccion = new Set(candidatas().map(a => a.id)); pintar(); };
+      $('#sp-none', el).onclick = () => { seleccion = new Set(); pintar(); };
+
       $('[data-x="c"]', el).onclick = () => closeSheet();
       $('[data-x="d"]', el)?.addEventListener('click', async () => {
         if (await confirmSheet({ title: 'Eliminar sprint', message: 'Esta acción no afecta las actividades.', confirmText: 'Eliminar', danger: true })) {
-          await store.deleteSprint(sprint.id); app.sprintId = ''; toast('Sprint eliminado', 'ok'); renderView();
+          if (await guardar(() => store.deleteSprint(sprint.id))) {
+            app.sprintId = ''; closeSheet(); toast('Sprint eliminado', 'ok'); renderView();
+          }
         }
       });
-      $('[data-x="s"]', el).onclick = async () => {
+      $('[data-x="s"]', el).onclick = async (ev) => {
         const start = $('#sp-start', el).value, end = $('#sp-end', el).value;
         if (!start || !end || end < start) return toast('Revisa las fechas', 'err');
-        const rec = await store.saveSprint({
-          ...(sprint?.id ? { id: sprint.id } : {}),
-          name: $('#sp-name', el).value.trim() || 'Sprint',
-          start, end
+        const btn = ev.currentTarget;
+        btn.disabled = true;
+        let rec;
+        const ok = await guardar(async () => {
+          rec = await store.saveSprint({
+            ...(sprint?.id ? { id: sprint.id, createdAt: sprint.createdAt } : {}),
+            name: $('#sp-name', el).value.trim() || 'Sprint',
+            start, end,
+            projectId: projSel.value,
+            activityIds: [...seleccion]
+          });
         });
+        btn.disabled = false;
+        if (!ok) return;
         app.sprintId = rec.id;
-        closeSheet(); toast('Sprint guardado', 'ok'); renderView();
+        closeSheet(); toast(isNew ? 'Sprint creado' : 'Sprint guardado', 'ok'); renderView();
       };
     }
   });
