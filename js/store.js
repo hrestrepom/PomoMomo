@@ -16,6 +16,10 @@ export const uid = () =>
 
 export const nowISO = () => new Date().toISOString();
 
+/** Fecha local en formato AAAA-MM-DD (no UTC: importa cerca de medianoche). */
+export const dayISO = (d = new Date()) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
 const clone = (o) => JSON.parse(JSON.stringify(o));
 
 /* ---------- Emisor de eventos ---------- */
@@ -43,13 +47,14 @@ export class Store extends Emitter {
     this.authError = null;   // último fallo de acceso, para mostrarlo en pantalla
 
     this.data = {
-      members:    [],
-      portfolios: [],
-      projects:   [],
-      activities: [],
-      history:    [],
-      sessions:   [],
-      sprints:    []
+      members:      [],
+      portfolios:   [],
+      projects:     [],
+      deliverables: [],
+      activities:   [],
+      history:      [],
+      sessions:     [],
+      sprints:      []
     };
 
     this.prefs = { ...DEFAULT_TIMER };
@@ -310,14 +315,14 @@ export class Store extends Emitter {
   }
 
   _resetData() {
-    this.data = { members: [], portfolios: [], projects: [], activities: [], history: [], sessions: [], sprints: [] };
+    this.data = { members: [], portfolios: [], projects: [], deliverables: [], activities: [], history: [], sessions: [], sprints: [] };
     this.emit('data', this.data);
   }
 
   _attachListeners() {
     const { db, fsMod } = this._fb;
     const { collection, onSnapshot, query, orderBy, limit } = fsMod;
-    const colls = ['members', 'portfolios', 'projects', 'activities', 'sprints'];
+    const colls = ['members', 'portfolios', 'projects', 'deliverables', 'activities', 'sprints'];
 
     let pending = colls.length + 1;
     const settle = () => {
@@ -548,6 +553,89 @@ export class Store extends Emitter {
     };
     await this._put('activities', patch);
     await this.log(id, 'status', { from: a.status, to: status });
+
+    // Al completar una actividad recurrente se engendra la siguiente ocurrencia
+    if (status === 'done' && a.recur) return this._spawnNextOccurrence(a);
+  }
+
+  /**
+   * Crea la siguiente ocurrencia de una actividad recurrente.
+   * @returns {object|null} la nueva actividad, para poder avisar en la interfaz
+   */
+  async _spawnNextOccurrence(a) {
+    const { nextOccurrence } = await import('./quickadd.js');
+    const base = a.dueDate || dayISO();
+    let next = nextOccurrence(a.recur, base);
+
+    // Si la fecha calculada ya pasó (tarea atrasada), avanza hasta el futuro
+    let guard = 0;
+    while (next && next < dayISO() && guard++ < 60) {
+      next = nextOccurrence(a.recur, next);
+    }
+    if (a.recur.until && next > a.recur.until) return null;
+
+    const nueva = await this._put('activities', {
+      name: a.name,
+      projectId: a.projectId || '',
+      deliverableId: a.deliverableId || '',
+      assigneeUid: a.assigneeUid || '',
+      quadrant: a.quadrant,
+      status: 'todo',
+      points: a.points || 0,
+      pomosEstimated: a.pomosEstimated || 0,
+      pomosDone: 0,
+      dueDate: next,
+      notes: a.notes || '',
+      recur: a.recur,
+      recurOf: a.recurOf || a.id,
+      createdAt: nowISO(),
+      createdBy: this.user?.uid || '',
+      completedAt: null
+    });
+    await this.log(nueva.id, 'created', { text: `Repetición de «${a.name}»` });
+    return nueva;
+  }
+
+  /* ======================================================================
+     Entregables — resultados tangibles que se marcan como logrados
+     ====================================================================== */
+  async saveDeliverable(d) {
+    return this._put('deliverables', {
+      ...d,
+      createdAt: d.createdAt || nowISO(),
+      createdBy: d.createdBy || this.user?.uid || ''
+    });
+  }
+
+  async achieveDeliverable(id, achieved = true) {
+    const d = this.data.deliverables.find(x => x.id === id);
+    if (!d) return;
+    await this._put('deliverables', {
+      ...d,
+      achieved,
+      achievedAt: achieved ? (d.achievedAt || nowISO()) : null,
+      achievedBy: achieved ? (this.user?.uid || '') : ''
+    });
+  }
+
+  async deleteDeliverable(id) {
+    // Las actividades vinculadas no se borran: solo pierden el vínculo
+    const acts = this.data.activities.filter(a => a.deliverableId === id);
+    for (const a of acts) await this._put('activities', { ...a, deliverableId: '' });
+    await this._del('deliverables', id);
+  }
+
+  deliverablesOf(projectId) {
+    return this.data.deliverables.filter(d => d.projectId === projectId);
+  }
+
+  deliverable(id) {
+    return this.data.deliverables.find(d => d.id === id) || null;
+  }
+
+  /** Actividades vinculadas a un entregable */
+  activitiesOfDeliverable(id) {
+    return this.data.activities.filter(a => a.deliverableId === id);
   }
 
   async setAssignee(id, assigneeUid) {

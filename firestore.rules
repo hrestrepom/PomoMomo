@@ -74,11 +74,12 @@ service cloud.firestore {
       }
 
       // ---- Datos de trabajo ----
-      match /portfolios/{id} { allow read, write: if isMember(); }
-      match /projects/{id}   { allow read, write: if isMember(); }
-      match /activities/{id} { allow read, write: if isMember(); }
-      match /sprints/{id}    { allow read, write: if isMember(); }
-      match /sessions/{id}   { allow read, write: if isMember(); }
+      match /portfolios/{id}   { allow read, write: if isMember(); }
+      match /projects/{id}     { allow read, write: if isMember(); }
+      match /deliverables/{id} { allow read, write: if isMember(); }
+      match /activities/{id}   { allow read, write: if isMember(); }
+      match /sprints/{id}      { allow read, write: if isMember(); }
+      match /sessions/{id}     { allow read, write: if isMember(); }
 
       // ---- Historial: se agrega, no se reescribe ----
       match /history/{id} {

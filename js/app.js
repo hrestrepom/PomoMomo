@@ -6,6 +6,7 @@ import { store, Store, Stats, nowISO } from './store.js';
 import {
   FRAMEWORKS, LEVELS, PRACTICES, diagnose, practiceById, practicesByLevel, scoreLabel
 } from './practices.js';
+import { parse as parseQuick, describeRecur, nextOccurrence, withAnchor, RECUR_OPTIONS } from './quickadd.js';
 import * as Chart from './charts.js';
 import {
   QUADRANTS, STATUSES, STATUS_ORDER, PALETTE, TILE_ICONS,
@@ -354,6 +355,8 @@ function viewToday() {
 
     ${bannerIfLocal()}
 
+    ${quickAddHtml()}
+
     <div class="grid grid-stats">
       <div class="stat">
         <span class="stat-label">Pendientes</span>
@@ -413,10 +416,137 @@ function viewToday() {
     toolbar: toolbar('Hoy', btnNew()),
     body,
     mount(root) {
+      bindQuickAdd(root);
       bindActivityRows(root);
       $$('[data-timer-toggle]', root).forEach(b => b.onclick = () => { toggleTimer(); renderView(); });
     }
   };
+}
+
+/* ---------- Captura rápida ---------- */
+function quickAddHtml() {
+  return `
+    <div class="card mt-16" style="padding:12px 14px">
+      <div class="row g-10">
+        <span style="color:var(--label-3);flex:0 0 auto">${icon('plus', 19)}</span>
+        <input class="grow" id="qa-input" autocomplete="off"
+          placeholder="Anota lo que sea y pulsa Enter…"
+          style="border:none;background:none;font-size:15px;min-width:0">
+        <button class="btn btn-sm btn-primary hidden" id="qa-save">Agregar</button>
+        <button class="icon-btn" id="qa-help" aria-label="Ayuda">${icon('info', 17)}</button>
+      </div>
+      <div id="qa-preview" class="row g-6 wrap hidden" style="margin-top:8px;padding-left:29px"></div>
+    </div>`;
+}
+
+function bindQuickAdd(root) {
+  const input = $('#qa-input', root);
+  const preview = $('#qa-preview', root);
+  const saveBtn = $('#qa-save', root);
+  if (!input) return;
+
+  const TONO = {
+    fecha:       'badge-blue',
+    proyecto:    'badge-purple',
+    prioridad:   'badge-red',
+    recurrencia: 'badge-green',
+    aviso:       'badge-orange'
+  };
+
+  const helpBtn = $('#qa-help', root);
+
+  const refresh = () => {
+    const txt = input.value.trim();
+    if (!txt) {
+      preview.classList.add('hidden');
+      saveBtn.classList.add('hidden');
+      helpBtn.classList.remove('hidden');
+      return;
+    }
+    const r = parseQuick(txt, store.data.projects);
+    saveBtn.classList.remove('hidden');
+    // La ayuda solo estorba mientras se escribe, y en móvil el espacio es escaso
+    helpBtn.classList.add('hidden');
+    if (!r.tokens.length) { preview.classList.add('hidden'); return; }
+    preview.classList.remove('hidden');
+    preview.innerHTML = r.tokens.map(t => `
+      <span class="badge ${TONO[t.tipo] || 'badge-gray'}">
+        ${t.tipo === 'fecha' ? icon('calendar', 11)
+        : t.tipo === 'proyecto' ? icon('briefcase', 11)
+        : t.tipo === 'recurrencia' ? icon('reset', 11)
+        : t.tipo === 'prioridad' ? icon('fire', 11)
+        : icon('warning', 11)}
+        ${esc(t.texto)}
+      </span>`).join('');
+  };
+
+  const submit = async () => {
+    const txt = input.value.trim();
+    if (!txt) return;
+    const r = parseQuick(txt, store.data.projects);
+    if (!r.name) { toast('Escribe al menos un nombre', 'err'); return; }
+
+    input.value = '';
+    preview.classList.add('hidden');
+    saveBtn.classList.add('hidden');
+    helpBtn.classList.remove('hidden');
+
+    await store.saveActivity({
+      name: r.name,
+      projectId: r.projectId,
+      deliverableId: '',
+      assigneeUid: store.user?.uid || '',
+      quadrant: r.quadrant,
+      status: 'todo',
+      points: 0,
+      pomosEstimated: 0,
+      dueDate: r.dueDate,
+      notes: '',
+      recur: r.recur,
+      completedAt: null
+    });
+
+    const detalles = [
+      r.dueDate ? fmtDue(r.dueDate) : null,
+      r.projectName || null,
+      r.recur ? describeRecur(r.recur) : null
+    ].filter(Boolean);
+    toast(detalles.length ? `Agregada · ${detalles.join(' · ')}` : 'Agregada', 'ok', 2200);
+    input.focus();
+  };
+
+  input.addEventListener('input', refresh);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); submit(); }
+    if (e.key === 'Escape') { input.value = ''; refresh(); input.blur(); }
+  });
+  saveBtn.onclick = submit;
+
+  helpBtn.onclick = () => openSheet({
+    title: 'Atajos de la captura rápida',
+    body: `
+      <p class="t-sub mb-16">Escribe normal y agrega estas pistas donde quieras: se detectan
+      solas y no quedan en el nombre.</p>
+      <div class="list">
+        ${[
+          ['Fechas',      'hoy · mañana · pasado mañana · el viernes · en 3 días · 15 de marzo · 12/3'],
+          ['Proyecto',    '#familia · #negocio — busca por el inicio del nombre'],
+          ['Urgente',     '! al final lo marca como Q1 (urgente e importante)'],
+          ['Se repite',   'cada día · cada semana · cada mes · cada año · cada martes']
+        ].map(([k, v]) => `<div class="list-row">
+          <span class="col grow" style="align-items:flex-start;gap:2px">
+            <span class="t-head">${k}</span>
+            <span class="t-foot">${esc(v)}</span>
+          </span></div>`).join('')}
+      </div>
+      <div class="section-label mt-16">Ejemplos</div>
+      <div class="tl-note" style="margin-top:0">Sacar la basura cada martes
+Pagar arriendo cada mes
+Llamar al dentista mañana !
+Revisar propuesta #negocio el viernes</div>`,
+    footer: `<button class="btn btn-primary" data-x="c">Entendido</button>`,
+    onMount(el) { $('[data-x="c"]', el).onclick = () => closeSheet(); }
+  });
 }
 
 function bannerIfLocal() {
@@ -445,6 +575,7 @@ function actRow(a) {
       <span class="row g-6 wrap" style="font-size:11.5px;color:var(--label-3)">
         ${pr ? `<span class="row g-4"><i class="dot" style="background:${pr.color || 'var(--gray)'}"></i>${esc(pr.name)}</span>` : ''}
         ${a.dueDate ? `<span class="badge badge-${tone === 'red' ? 'red' : tone === 'orange' ? 'orange' : 'gray'}">${fmtDue(a.dueDate)}</span>` : ''}
+        ${a.recur ? `<span class="row g-3" title="${esc(describeRecur(a.recur))}">${icon('reset', 11)}${esc(describeRecur(a.recur))}</span>` : ''}
         ${a.pomosEstimated ? `<span>🍅 ${a.pomosDone || 0}/${a.pomosEstimated}</span>` : ''}
       </span>
     </button>
@@ -459,8 +590,11 @@ function bindActivityRows(root) {
     e.stopPropagation();
     const a = store.activity(b.dataset.toggleDone);
     if (!a) return;
-    await store.setActivityStatus(a.id, a.status === 'done' ? 'todo' : 'done');
-    toast(a.status === 'done' ? 'Reabierta' : '¡Completada!', 'ok', 1500);
+    const eraDone = a.status === 'done';
+    const nueva = await store.setActivityStatus(a.id, eraDone ? 'todo' : 'done');
+    if (eraDone) toast('Reabierta', 'ok', 1500);
+    else if (nueva) toast(`¡Completada! Siguiente: ${fmtDue(nueva.dueDate)}`, 'ok', 2600);
+    else toast('¡Completada!', 'ok', 1500);
   });
   $$('[data-open-act]', root).forEach(b => b.onclick = () => activityDetail(b.dataset.openAct));
   $$('[data-act-menu]', root).forEach(b => b.onclick = (e) => {
@@ -1066,6 +1200,8 @@ function viewProjectDetail({ id }) {
       </div>
     </div>` : ''}
 
+    ${deliverablesSection(pr)}
+
     <div class="row between mb-8" style="padding:0 4px">
       <span class="t-head">Actividades</span>
       <button class="btn btn-sm btn-tinted" data-new-activity>${icon('plus', 14)} Nueva</button>
@@ -1091,9 +1227,145 @@ function viewProjectDetail({ id }) {
     mount(root) {
       $('[data-edit-pr]')?.addEventListener('click', () => projectEditor(pr));
       $$('[data-new-activity]').forEach(b => b.onclick = () => activityEditor({ projectId: id }));
+      bindDeliverables(root, id);
       bindActivityRows(root);
     }
   };
+}
+
+/* ==========================================================================
+   Entregables — el registro de logros reales
+   ========================================================================== */
+function deliverablesSection(pr) {
+  const list = store.deliverablesOf(pr.id);
+  const logrados = list.filter(d => d.achieved).length;
+
+  return `
+    <div class="row between mb-8" style="padding:0 4px">
+      <span class="row g-8">
+        <span class="t-head">Entregables</span>
+        ${list.length ? `<span class="badge badge-gray">${logrados}/${list.length} logrados</span>` : ''}
+      </span>
+      <button class="btn btn-sm btn-tinted" data-new-deliv>${icon('plus', 14)} Nuevo</button>
+    </div>
+
+    ${list.length ? `<div class="list mb-24">${list.map(d => deliverableRow(d)).join('')}</div>`
+      : `<div class="card mb-24" style="padding:16px">
+          <div class="row g-12">
+            ${icon('flag', 20)}
+            <span class="col grow">
+              <span class="t-head">Sin entregables</span>
+              <span class="t-sub">Un entregable es un resultado tangible: «Bici arreglada», «Contrato firmado»,
+              «Viaje planeado». Las actividades son el camino; el entregable es el logro.</span>
+            </span>
+            <button class="btn btn-sm btn-primary" data-new-deliv style="flex:0 0 auto">Crear</button>
+          </div>
+        </div>`}`;
+}
+
+function deliverableRow(d) {
+  const acts = store.activitiesOfDeliverable(d.id);
+  const hechas = acts.filter(a => a.status === 'done').length;
+  const pct = acts.length ? Math.round(hechas / acts.length * 100) : 0;
+  const tone = dueTone(d.targetDate, d.achieved ? 'done' : '');
+
+  return `<div class="list-row">
+    <button class="act-check ${d.achieved ? 'done' : ''}" data-achieve="${d.id}"
+      aria-label="${d.achieved ? 'Quitar logro' : 'Marcar como logrado'}">${icon('check', 13)}</button>
+
+    <button class="col grow" style="align-items:flex-start;min-width:0;gap:3px;text-align:left"
+      data-edit-deliv="${d.id}">
+      <span class="row g-6 w-full">
+        <span class="truncate" style="font-size:14.5px;font-weight:550;${d.achieved ? 'color:var(--label-2)' : ''}">${esc(d.name)}</span>
+        ${d.achieved ? `<span class="badge badge-green">${icon('check', 10)} ${fmtDate(d.achievedAt)}</span>` : ''}
+      </span>
+      ${d.desc ? `<span class="t-foot truncate w-full">${esc(d.desc)}</span>` : ''}
+      ${acts.length ? `<span class="row g-6 w-full" style="max-width:220px">
+          <span class="progress grow" style="height:4px"><i style="width:${pct}%;background:${d.achieved ? 'var(--green)' : 'var(--blue)'}"></i></span>
+          <span class="t-cap tnum">${hechas}/${acts.length}</span>
+        </span>` : ''}
+    </button>
+
+    ${d.targetDate && !d.achieved
+      ? `<span class="badge badge-${tone === 'red' ? 'red' : tone === 'orange' ? 'orange' : 'gray'}">${fmtDue(d.targetDate)}</span>`
+      : ''}
+    <button class="icon-btn" data-deliv-menu="${d.id}" aria-label="Opciones">${icon('more', 16)}</button>
+  </div>`;
+}
+
+function bindDeliverables(root, projectId) {
+  $$('[data-new-deliv]', root).forEach(b => b.onclick = () => deliverableEditor({ projectId }));
+
+  $$('[data-achieve]', root).forEach(b => b.onclick = async (e) => {
+    e.stopPropagation();
+    const d = store.deliverable(b.dataset.achieve);
+    if (!d) return;
+    await store.achieveDeliverable(d.id, !d.achieved);
+    toast(d.achieved ? 'Logro retirado' : `🎉 ¡Logrado: ${d.name}!`, 'ok', 2400);
+  });
+
+  $$('[data-edit-deliv]', root).forEach(b => b.onclick = () => deliverableEditor(store.deliverable(b.dataset.editDeliv)));
+
+  $$('[data-deliv-menu]', root).forEach(b => b.onclick = (e) => {
+    e.stopPropagation();
+    const d = store.deliverable(b.dataset.delivMenu);
+    if (!d) return;
+    openMenu(b, [
+      { label: 'Editar', icon: 'pencil', onClick: () => deliverableEditor(d) },
+      { label: d.achieved ? 'Quitar logro' : 'Marcar como logrado', icon: 'check',
+        onClick: () => store.achieveDeliverable(d.id, !d.achieved) },
+      { label: 'Nueva actividad para esto', icon: 'plus',
+        onClick: () => activityEditor({ projectId: d.projectId, deliverableId: d.id }) },
+      '-',
+      { label: 'Eliminar', icon: 'trash', danger: true, onClick: async () => {
+        const n = store.activitiesOfDeliverable(d.id).length;
+        if (await confirmSheet({
+          title: 'Eliminar entregable',
+          message: n ? `Se eliminará «${d.name}». Sus ${n} actividad(es) se conservan, solo pierden el vínculo.`
+                     : `Se eliminará «${d.name}».`,
+          confirmText: 'Eliminar', danger: true
+        })) { await store.deleteDeliverable(d.id); toast('Entregable eliminado', 'ok'); }
+      }}
+    ]);
+  });
+}
+
+function deliverableEditor(d = null) {
+  const isNew = !d?.id;
+  const cur = { name: '', desc: '', targetDate: '', projectId: '', ...d };
+
+  openSheet({
+    title: isNew ? 'Nuevo entregable' : 'Editar entregable',
+    body: `
+      <div class="field"><label>¿Qué resultado tangible quieres lograr?</label>
+        <input class="input" id="dl-name" value="${esc(cur.name)}"
+          placeholder="Ej. Bici arreglada · Contrato firmado · Viaje planeado"></div>
+      <p class="t-foot mt-4">Escríbelo como un resultado ya conseguido, no como una tarea.</p>
+
+      <div class="field mt-16"><label>Descripción <span class="muted-2">(opcional)</span></label>
+        <textarea class="textarea" id="dl-desc" placeholder="¿Cómo sabrás que está logrado?">${esc(cur.desc)}</textarea></div>
+
+      <div class="field mt-16"><label>Fecha objetivo <span class="muted-2">(opcional)</span></label>
+        <input class="input" type="date" id="dl-date" value="${cur.targetDate || ''}"></div>`,
+    footer: `<button class="btn btn-gray" data-x="c">Cancelar</button>
+             <button class="btn btn-primary" data-x="s">${isNew ? 'Crear' : 'Guardar'}</button>`,
+    onMount(el) {
+      $('[data-x="c"]', el).onclick = () => closeSheet();
+      $('[data-x="s"]', el).onclick = async () => {
+        const name = $('#dl-name', el).value.trim();
+        if (!name) return toast('Escribe el entregable', 'err');
+        await store.saveDeliverable({
+          ...(d?.id ? { id: d.id, createdAt: d.createdAt, achieved: d.achieved, achievedAt: d.achievedAt } : {}),
+          projectId: cur.projectId,
+          name,
+          desc: $('#dl-desc', el).value.trim(),
+          targetDate: $('#dl-date', el).value
+        });
+        closeSheet();
+        toast(isNew ? 'Entregable creado' : 'Guardado', 'ok');
+      };
+    }
+  });
 }
 
 function projectEditor(pr = null) {
@@ -1397,8 +1669,8 @@ function bindKanban(root) {
 function activityEditor(a = null) {
   const isNew = !a?.id;
   const cur = {
-    name: '', projectId: '', assigneeUid: store.user?.uid || '', quadrant: 'Q2',
-    status: 'todo', points: 3, pomosEstimated: 2, dueDate: '', notes: '', ...a
+    name: '', projectId: '', deliverableId: '', assigneeUid: store.user?.uid || '', quadrant: 'Q2',
+    status: 'todo', points: 3, pomosEstimated: 2, dueDate: '', notes: '', recur: null, ...a
   };
   const pfs = store.data.portfolios;
   const loose = store.data.projects.filter(p => !p.portfolioId);
@@ -1453,8 +1725,19 @@ function activityEditor(a = null) {
           <input class="input" type="number" id="a-pomos" min="0" max="40" value="${cur.pomosEstimated}"></div>
       </div>
 
-      <div class="field mt-16"><label>Fecha límite</label>
-        <input class="input" type="date" id="a-due" value="${cur.dueDate || ''}"></div>
+      <div class="grid grid-2 mt-16" style="gap:12px">
+        <div class="field"><label>Fecha límite</label>
+          <input class="input" type="date" id="a-due" value="${cur.dueDate || ''}"></div>
+        <div class="field"><label>Se repite</label>
+          <select class="select" id="a-recur">
+            ${RECUR_OPTIONS.map(o => `<option value="${o.value}" ${(cur.recur?.freq || '') === o.value ? 'selected' : ''}>${o.label}</option>`).join('')}
+          </select></div>
+      </div>
+
+      <div class="field mt-16" id="a-deliv-wrap">
+        <label>Entregable <span class="muted-2">(opcional)</span></label>
+        <select class="select" id="a-deliverable"></select>
+      </div>
 
       <div class="field mt-16"><label>Notas</label>
         <textarea class="textarea" id="a-notes" placeholder="Contexto, criterios de aceptación, enlaces…">${esc(cur.notes)}</textarea></div>`,
@@ -1466,22 +1749,45 @@ function activityEditor(a = null) {
         quad = b.dataset.q;
         $$('[data-q]', el).forEach(x => x.classList.toggle('on', x === b));
       });
+
+      /* El selector de entregables depende del proyecto elegido */
+      const projSel = $('#a-project', el);
+      const delivSel = $('#a-deliverable', el);
+      const delivWrap = $('#a-deliv-wrap', el);
+      const fillDeliverables = () => {
+        const list = store.deliverablesOf(projSel.value);
+        delivWrap.classList.toggle('hidden', !projSel.value || !list.length);
+        delivSel.innerHTML = `<option value="">Sin entregable</option>` +
+          list.map(d => `<option value="${d.id}" ${cur.deliverableId === d.id ? 'selected' : ''}>
+            ${d.achieved ? '✓ ' : ''}${esc(d.name)}</option>`).join('');
+      };
+      fillDeliverables();
+      projSel.addEventListener('change', fillDeliverables);
+
       $('[data-x="c"]', el).onclick = () => closeSheet();
       $('[data-x="s"]', el).onclick = async () => {
         const name = $('#a-name', el).value.trim();
         if (!name) return toast('Escribe el nombre de la actividad', 'err');
         const status = $('#a-status', el).value;
+        const freq = $('#a-recur', el).value;
+        const due = $('#a-due', el).value;
+        const recur = freq
+          ? withAnchor({ ...(cur.recur || {}), freq, interval: cur.recur?.interval || 1 }, due)
+          : null;
+
         await store.saveActivity({
           ...(a?.id ? { id: a.id, createdAt: a.createdAt, completedAt: a.completedAt } : {}),
           name,
-          projectId: $('#a-project', el).value,
+          projectId: projSel.value,
+          deliverableId: delivWrap.classList.contains('hidden') ? '' : delivSel.value,
           assigneeUid: $('#a-assignee', el).value,
           quadrant: quad,
           status,
           points: +$('#a-points', el).value,
           pomosEstimated: clampInt($('#a-pomos', el).value, 0, 40, 0),
-          dueDate: $('#a-due', el).value,
+          dueDate: due,
           notes: $('#a-notes', el).value.trim(),
+          recur,
           completedAt: status === 'done' ? (a?.completedAt || nowISO()) : null
         });
         closeSheet();
