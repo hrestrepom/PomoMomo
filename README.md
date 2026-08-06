@@ -11,7 +11,7 @@ Interfaz minimalista estilo Apple. Funciona como app instalable (PWA) en
 ## Estructura
 
 ```
-Gestion_Proyectos/
+PomoMomo/
 ├── index.html              Punto de entrada
 ├── manifest.webmanifest    Metadatos PWA
 ├── sw.js                   Service worker (offline)
@@ -103,7 +103,8 @@ export const FIREBASE_CONFIG = {
 2. Pestaña **Sign-in method** → **Google** → **Habilitar**
 3. Elige un correo de soporte → **Guardar**
 4. Pestaña **Settings** → **Dominios autorizados** → **Agregar dominio**:
-   `TU-USUARIO.github.io`
+   `hrestrepom.github.io`
+   (solo el dominio: sin `https://` y sin la ruta del repositorio)
 
 ### 2.5 Crear la base de datos
 
@@ -137,11 +138,12 @@ Luego en GitHub:
 En 1–2 minutos estará en:
 
 ```
-https://TU-USUARIO.github.io/Gestion_Proyectos/
+https://hrestrepom.github.io/PomoMomo/
 ```
 
-> ⚠️ No olvides agregar ese dominio en **Firebase → Authentication → Settings →
-> Dominios autorizados**, o el login fallará.
+> ⚠️ No olvides agregar `hrestrepom.github.io` en **Firebase → Authentication →
+> Settings → Dominios autorizados**, o el login fallará. El dominio es el mismo
+> aunque renombres el repositorio: solo cambia la ruta después del dominio.
 
 ---
 
