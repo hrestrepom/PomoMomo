@@ -1,0 +1,92 @@
+rules_version = '2';
+
+// ============================================================================
+// PomoMomo — Reglas de seguridad de Firestore
+// Cópialas en: Firebase Console → Firestore Database → Reglas → Publicar
+//
+// Modelo: un espacio de trabajo compartido ("principal" por defecto).
+//   · Solo los miembros leen y escriben.
+//   · Alguien invitado (doc en /invites/{email}) puede autoregistrarse.
+//   · El PRIMER usuario que entra cuando no hay miembros se vuelve propietario.
+// ============================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    match /workspaces/{ws} {
+
+      function signedIn() {
+        return request.auth != null;
+      }
+
+      function myEmail() {
+        return signedIn() ? request.auth.token.email.lower() : '';
+      }
+
+      function isMember() {
+        return signedIn() &&
+          exists(/databases/$(database)/documents/workspaces/$(ws)/members/$(request.auth.uid));
+      }
+
+      function isOwner() {
+        return isMember() &&
+          get(/databases/$(database)/documents/workspaces/$(ws)/members/$(request.auth.uid)).data.role == 'owner';
+      }
+
+      function isInvited() {
+        return signedIn() &&
+          exists(/databases/$(database)/documents/workspaces/$(ws)/invites/$(myEmail()));
+      }
+
+      // El espacio está vacío (aún sin propietario): permite el arranque inicial.
+      function workspaceUnclaimed() {
+        return !exists(/databases/$(database)/documents/workspaces/$(ws));
+      }
+
+      // ---- Documento del espacio ----
+      allow read:   if isMember() || isInvited() || workspaceUnclaimed();
+      allow create: if signedIn() && workspaceUnclaimed();
+      allow update: if isOwner();
+      allow delete: if false;
+
+      // ---- Miembros ----
+      match /members/{memberId} {
+        allow read: if isMember() || isInvited() || workspaceUnclaimed();
+
+        // Solo puedes crear TU propio doc, y solo si estás invitado
+        // o si el espacio todavía no tiene dueño.
+        allow create: if signedIn()
+                      && memberId == request.auth.uid
+                      && (isInvited() || workspaceUnclaimed());
+
+        // Cada quien actualiza su propio perfil; el propietario administra a todos.
+        allow update: if isOwner() || (isMember() && memberId == request.auth.uid);
+        allow delete: if isOwner() && memberId != request.auth.uid;
+      }
+
+      // ---- Invitaciones ----
+      match /invites/{email} {
+        // Puedes leer la tuya (para autoregistrarte) o cualquiera si eres miembro.
+        allow read:   if isMember() || (signedIn() && email == myEmail());
+        allow create, update: if isMember();
+        // Se borra sola al aceptarla, o la borra un miembro.
+        allow delete: if isMember() || (signedIn() && email == myEmail());
+      }
+
+      // ---- Datos de trabajo ----
+      match /portfolios/{id} { allow read, write: if isMember(); }
+      match /projects/{id}   { allow read, write: if isMember(); }
+      match /activities/{id} { allow read, write: if isMember(); }
+      match /sprints/{id}    { allow read, write: if isMember(); }
+      match /sessions/{id}   { allow read, write: if isMember(); }
+
+      // ---- Historial: se agrega, no se reescribe ----
+      match /history/{id} {
+        allow read:   if isMember();
+        allow create: if isMember();
+        allow update: if false;
+        allow delete: if isOwner();
+      }
+    }
+  }
+}

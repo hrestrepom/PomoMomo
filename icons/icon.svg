@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FF7A6B"/>
+      <stop offset="0.55" stop-color="#FF3B30"/>
+      <stop offset="1" stop-color="#D92A20"/>
+    </linearGradient>
+    <radialGradient id="gloss" cx="0.5" cy="-0.15" r="0.95">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="9" stdDeviation="11" flood-color="#7A1512" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+
+  <rect width="512" height="512" rx="114" fill="url(#bg)"/>
+  <rect width="512" height="512" rx="114" fill="url(#gloss)"/>
+
+  <!-- hojas -->
+  <g fill="#3AC763">
+    <path d="M256 82c14 26 20 52 20 82h-40c0-30 6-56 20-82Z"/>
+    <path d="M156 132c26 6 48 18 66 36l-24 24c-18-18-32-38-42-60Z"/>
+    <path d="M356 132c-26 6-48 18-66 36l24 24c18-18 32-38 42-60Z"/>
+  </g>
+
+  <!-- esfera del reloj -->
+  <g filter="url(#soft)">
+    <circle cx="256" cy="315" r="122" fill="#fff" fill-opacity="0.96"/>
+  </g>
+
+  <!-- manecillas -->
+  <g stroke="#FF3B30" stroke-width="19" stroke-linecap="round" fill="none">
+    <path d="M256 315V242"/>
+    <path d="M256 315l51 33"/>
+  </g>
+  <circle cx="256" cy="315" r="13" fill="#FF3B30"/>
+</svg>

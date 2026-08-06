@@ -1,0 +1,25 @@
+{
+  "name": "PomoMomo — Gestión de Proyectos",
+  "short_name": "PomoMomo",
+  "description": "Portafolios, proyectos y actividades con matriz de Eisenhower, Kanban, burndown y temporizador Pomodoro.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#F2F2F7",
+  "theme_color": "#F2F2F7",
+  "lang": "es",
+  "dir": "ltr",
+  "categories": ["productivity", "business"],
+  "icons": [
+    { "src": "./icons/icon.svg",     "sizes": "any",     "type": "image/svg+xml", "purpose": "any" },
+    { "src": "./icons/icon-192.png", "sizes": "192x192", "type": "image/png",     "purpose": "any" },
+    { "src": "./icons/icon-512.png", "sizes": "512x512", "type": "image/png",     "purpose": "any" },
+    { "src": "./icons/icon-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Foco",        "short_name": "Foco",   "url": "./index.html#/focus",      "description": "Iniciar un pomodoro" },
+    { "name": "Actividades", "short_name": "Tareas", "url": "./index.html#/activities", "description": "Ver todas las actividades" },
+    { "name": "Métricas",    "short_name": "Datos",  "url": "./index.html#/metrics",    "description": "Ver métricas y burndown" }
+  ]
+}
