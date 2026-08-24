@@ -44,7 +44,8 @@ export class Store extends Emitter {
     this.authState = 'loading';   // 'loading' | 'signed-out' | 'signed-in' | 'no-access'
     this.user = null;
     this.error = null;
-    this.authError = null;   // último fallo de acceso, para mostrarlo en pantalla
+    this.authError = null;      // último fallo de acceso, para mostrarlo en pantalla
+    this.listenerErrors = {};   // colecciones que no se pudieron leer
 
     this.data = {
       members:      [],
@@ -337,7 +338,7 @@ export class Store extends Emitter {
           this.emit('data', this.data);
           if (pending > 0) settle();
         },
-        (err) => { console.error(`[${name}]`, err); if (pending > 0) settle(); }
+        (err) => { this._listenerFailed(name, err); if (pending > 0) settle(); }
       );
       this._unsubs.push(un);
     });
@@ -353,7 +354,7 @@ export class Store extends Emitter {
         this.emit('data', this.data);
         if (pending > 0) settle();
       },
-      (err) => { console.error('[history]', err); if (pending > 0) settle(); }
+      (err) => { this._listenerFailed('history', err); if (pending > 0) settle(); }
     );
     this._unsubs.push(unH);
 
@@ -363,9 +364,29 @@ export class Store extends Emitter {
       orderBy('endedAt', 'desc'), limit(400)
     );
     this._unsubs.push(onSnapshot(sRef,
-      (snap) => { this.data.sessions = snap.docs.map(d => ({ id: d.id, ...d.data() })); this.emit('data', this.data); },
-      (err) => console.error('[sessions]', err)
+      (snap) => {
+        this.data.sessions = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        delete this.listenerErrors.sessions;
+        this.emit('data', this.data);
+      },
+      (err) => this._listenerFailed('sessions', err)
     ));
+  }
+
+  /**
+   * Un listener que falla dejaba su colección vacía sin ninguna señal:
+   * la interfaz mostraba cero datos como si no hubiera nada guardado.
+   */
+  _listenerFailed(coll, err) {
+    const code = err?.code || 'desconocido';
+    this.listenerErrors[coll] = {
+      code,
+      message: code === 'permission-denied'
+        ? `Firestore no deja leer «${coll}». Falta publicar la regla de esa colección.`
+        : (err?.message || 'No se pudo leer la colección.')
+    };
+    console.error(`[PomoMomo] Lectura de ${coll}:`, code, err);
+    this.emit('data', this.data);
   }
 
   _teardownListeners() {

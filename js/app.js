@@ -2566,7 +2566,19 @@ function viewMetrics() {
       <div class="card">
         <div class="card-head"><span class="card-title">Tiempo enfocado · 14 días</span>
           <span class="t-foot">${fmtDuration(minsByDay.reduce((a, b) => a + b, 0))}</span></div>
-        <div class="chart-box"><canvas id="c-focus"></canvas></div>
+        ${store.listenerErrors?.sessions ? `
+          <div class="banner banner-warn">${icon('warning', 16)}
+            <span>${esc(store.listenerErrors.sessions.message)}</span></div>`
+        : store.data.sessions.length === 0 ? `
+          <div class="col center g-8" style="padding:26px 12px;text-align:center">
+            ${icon('timer', 30, 'muted-2')}
+            <span class="t-head muted">Sin sesiones registradas</span>
+            <span class="t-sub" style="max-width:300px">Cada pomodoro que completes en
+            <b>Foco</b> queda aquí. Solo cuentan los que llegan al final del tiempo:
+            saltarlos con ⏭ no los registra.</span>
+            <button class="btn btn-sm btn-tinted mt-4" data-go="focus">${icon('timer', 14)} Ir a Foco</button>
+          </div>`
+        : `<div class="chart-box"><canvas id="c-focus"></canvas></div>`}
       </div>
     </div>
 
@@ -2632,7 +2644,7 @@ function viewMetrics() {
         const ct = $('#c-throughput');
         if (ct) Chart.bars(ct, { labels: dayLabels, values: doneByDay, color: '#34C759' }, 200);
 
-        const cf = $('#c-focus');
+        const cf = $('#c-focus');   // ausente cuando no hay sesiones que mostrar
         if (cf) Chart.area(cf, { labels: dayLabels, values: minsByDay, color: '#FF3B30' }, 200);
       };
 
@@ -3238,6 +3250,16 @@ function viewSettings() {
           ${icon('info', 16)}
           <span>Abre <b>js/config.js</b>, pega tu <b>firebaseConfig</b> y recarga la página.</span>
         </div>` : ''}
+
+      ${Object.keys(store.listenerErrors || {}).length ? `
+        <div class="banner banner-warn mt-12" style="align-items:flex-start">
+          ${icon('warning', 16)}
+          <span class="col g-4 grow">
+            <b>Hay colecciones que no se pueden leer</b>
+            ${Object.entries(store.listenerErrors).map(([k, v]) =>
+              `<span>· ${esc(v.message)} <span class="t-cap">(${esc(v.code)})</span></span>`).join('')}
+          </span>
+        </div>` : ''}
     </div>
 
     <div class="card mb-16">
@@ -3255,7 +3277,8 @@ function viewSettings() {
       <div class="card-head"><span class="card-title">Datos</span></div>
       <div class="grid grid-stats mb-16" style="gap:10px">
         ${[['Portafolios', d.portfolios.length], ['Proyectos', d.projects.length],
-           ['Actividades', d.activities.length], ['Eventos', d.history.length]].map(([k, v]) => `
+           ['Actividades', d.activities.length], ['Entregables', d.deliverables.length],
+           ['Pomodoros', d.sessions.length], ['Eventos', d.history.length]].map(([k, v]) => `
           <div class="stat" style="box-shadow:none;background:var(--surface-2)">
             <span class="stat-label">${k}</span><span class="stat-value" style="font-size:21px">${v}</span>
           </div>`).join('')}
