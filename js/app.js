@@ -1695,7 +1695,7 @@ function deliverableEditor(d = null) {
         const btn = ev.currentTarget;
         btn.disabled = true;
         const ok = await guardar(() => store.saveDeliverable({
-          ...(d?.id ? { id: d.id, createdAt: d.createdAt, achieved: d.achieved, achievedAt: d.achievedAt } : {}),
+          ...(d?.id ? { id: d.id } : {}),   // el resto lo conserva saveDeliverable
           projectId: cur.projectId,
           name,
           desc: $('#dl-desc', el).value.trim(),

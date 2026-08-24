@@ -22,6 +22,28 @@ export const dayISO = (d = new Date()) =>
 
 const clone = (o) => JSON.parse(JSON.stringify(o));
 
+/**
+ * Elimina los `undefined` en cualquier nivel: Firestore los rechaza con
+ * "Unsupported field value: undefined" y tumba la escritura entera.
+ * Con merge:true, omitir un campo conserva su valor anterior, que es
+ * justo lo que significa "no especificado". `null` sí es válido y se
+ * respeta, porque es la forma de borrar un valor a propósito.
+ */
+function sanitize(value) {
+  if (Array.isArray(value)) {
+    return value.filter(v => v !== undefined).map(sanitize);
+  }
+  if (value && typeof value === 'object' && !(value instanceof Date)) {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (v === undefined) continue;
+      out[k] = sanitize(v);
+    }
+    return out;
+  }
+  return value;
+}
+
 /* ---------- Emisor de eventos ---------- */
 class Emitter {
   constructor() { this._h = {}; }
@@ -474,7 +496,7 @@ export class Store extends Emitter {
       const { doc, setDoc } = fsMod;
       const { id: _drop, ...payload } = rec;
       try {
-        await setDoc(doc(db, 'workspaces', WORKSPACE_ID, coll, id), payload, { merge: true });
+        await setDoc(doc(db, 'workspaces', WORKSPACE_ID, coll, id), sanitize(payload), { merge: true });
       } catch (e) { throw Store.writeError(e, coll); }
     } else {
       const arr = this.data[coll];
@@ -656,10 +678,15 @@ export class Store extends Emitter {
      Entregables — resultados tangibles que se marcan como logrados
      ====================================================================== */
   async saveDeliverable(d) {
+    const prev = d.id ? this.deliverable(d.id) : null;
     return this._put('deliverables', {
       ...d,
-      createdAt: d.createdAt || nowISO(),
-      createdBy: d.createdBy || this.user?.uid || ''
+      desc:       d.desc ?? prev?.desc ?? '',
+      targetDate: d.targetDate ?? prev?.targetDate ?? '',
+      achieved:   d.achieved ?? prev?.achieved ?? false,
+      achievedAt: d.achievedAt ?? prev?.achievedAt ?? null,
+      createdAt:  d.createdAt || prev?.createdAt || nowISO(),
+      createdBy:  d.createdBy || prev?.createdBy || this.user?.uid || ''
     });
   }
 
