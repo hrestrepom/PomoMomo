@@ -51,10 +51,41 @@ function loadTimer() {
     timer = { ...timer, ...t };
     if (timer.running && timer.endsAt) {
       const left = Math.round((timer.endsAt - Date.now()) / 1000);
-      if (left <= 0) { timer.running = false; timer.endsAt = null; timer.remaining = modeSecs(timer.mode); }
-      else timer.remaining = left;
+      if (left <= 0) {
+        /* El tiempo se cumplió mientras la app estaba cerrada. No se puede
+           registrar aquí porque el store todavía no está listo: se deja
+           pendiente y lo procesa boot(). Antes se descartaba en silencio y
+           el pomodoro no aparecía nunca en las métricas. */
+        timer.running = false;
+        timer.endsAt = null;
+        timer.pending = { mode: timer.mode, activityId: timer.activityId, at: Date.now() };
+        timer.remaining = modeSecs(timer.mode);
+      } else {
+        timer.remaining = left;
+      }
     }
   } catch { /* ignora */ }
+}
+
+/** Registra un pomodoro que se completó con la app cerrada. */
+async function resolvePendingPomodoro() {
+  const p = timer.pending;
+  if (!p) return;
+  timer.pending = null;
+  saveTimer();
+
+  if (p.mode !== 'focus') return;           // los descansos no se registran
+
+  const minutes = store.prefs.focus ?? DEFAULT_TIMER.focus;
+  // El contador solo avanza si el registro llegó a guardarse
+  const ok = await guardar(() => store.addPomodoro(p.activityId, minutes));
+  if (!ok) return;
+  timer.cycle += 1;
+  saveTimer();
+
+  const a = p.activityId ? store.activity(p.activityId) : null;
+  toast(`Pomodoro recuperado${a ? ' · ' + a.name : ''}`, 'ok', 3200);
+  if (a) pomodoroDoneSheet(a.id, minutes, { recuperado: true });
 }
 function saveTimer() {
   try { localStorage.setItem(TKEY, JSON.stringify(timer)); } catch { /* ignora */ }
@@ -117,6 +148,7 @@ async function boot() {
   renderAll();
   await store.init();
   startTicker();
+  await resolvePendingPomodoro();
 }
 
 function debounce(fn, ms) {
@@ -714,7 +746,7 @@ function viewFocus() {
         <div class="card">
           <div class="card-head">
             <span class="card-title">Actividad en foco</span>
-            ${act ? `<button class="btn btn-sm btn-gray" data-clear-act>Quitar</button>` : ''}
+            ${act ? `<button class="icon-btn" data-focus-menu aria-label="Opciones">${icon('more', 16)}</button>` : ''}
           </div>
           ${act ? focusActCard(act) : `<p class="t-sub">Elige una actividad de la lista para registrar los pomodoros en ella.</p>`}
         </div>
@@ -770,7 +802,33 @@ function viewFocus() {
       $$('[data-pick]', root).forEach(b => b.onclick = () => {
         timer.activityId = b.dataset.pick; saveTimer(); renderView();
       });
-      $('[data-clear-act]', root)?.addEventListener('click', () => { timer.activityId = null; saveTimer(); renderView(); });
+      /* Acciones directas sobre la actividad en foco, sin ir a buscarla */
+      $$('[data-fa]', root).forEach(b => b.onclick = async () => {
+        const id = timer.activityId;
+        if (!id) return;
+        if (b.dataset.fa === 'done') {
+          const nueva = await store.setActivityStatus(id, 'done');
+          timer.activityId = null; saveTimer();
+          toast(nueva ? `Completada · siguiente ${fmtDue(nueva.dueDate)}` : '¡Actividad completada!', 'ok', 2400);
+          renderView();
+        } else if (b.dataset.fa === 'resched') {
+          rescheduleSheet(id);
+        } else {
+          activityEditor(store.activity(id));
+        }
+      });
+
+      $('[data-focus-menu]', root)?.addEventListener('click', (e) => openMenu(e.currentTarget, [
+        { label: 'Ver detalle', icon: 'info', onClick: () => activityDetail(timer.activityId) },
+        { label: 'Editar', icon: 'pencil', onClick: () => activityEditor(store.activity(timer.activityId)) },
+        { label: 'Reprogramar', icon: 'calendar', onClick: () => rescheduleSheet(timer.activityId) },
+        '-',
+        { label: 'Quitar del foco', icon: 'inbox', onClick: () => {
+          timer.activityId = null; saveTimer(); renderView();
+          toast('Actividad liberada del foco', 'ok', 1600);
+        }}
+      ]));
+
       $('[data-timer-settings]')?.addEventListener('click', timerSettingsSheet);
       $$('[data-new-activity]', root).forEach(b => b.onclick = () => activityEditor());
       $$('[data-open-act]', root).forEach(b => b.onclick = () => activityDetail(b.dataset.openAct));
@@ -801,6 +859,13 @@ function focusActCard(a) {
           <div class="progress"><i style="width:${pct * 100}%;background:var(--red)"></i></div>
         </div>` : ''}
       ${a.notes ? `<div class="tl-note">${esc(a.notes)}</div>` : ''}
+
+      <div class="row g-8 wrap">
+        <button class="btn btn-sm btn-tinted" data-fa="done" style="background:var(--green-t);color:#248A3D">
+          ${icon('check', 14)} Completar</button>
+        <button class="btn btn-sm btn-gray" data-fa="resched">${icon('calendar', 14)} Reprogramar</button>
+        <button class="btn btn-sm btn-gray" data-fa="edit">${icon('pencil', 14)} Editar</button>
+      </div>
     </div>`;
 }
 
@@ -868,13 +933,17 @@ async function completePhase(skipped) {
   timer.running = false;
   timer.endsAt = null;
 
+  const actividadDelPomodoro = timer.activityId;
+
+  let registrado = false;
+
   if (wasFocus) {
     if (!skipped) {
-      timer.cycle += 1;
-      await store.addPomodoro(timer.activityId, minutes);
+      registrado = await guardar(() => store.addPomodoro(actividadDelPomodoro, minutes));
+      if (registrado) timer.cycle += 1;   // solo cuenta lo que quedó guardado
       if (store.prefs.sound) chime('done');
       notify('Pomodoro completado', 'Tómate un descanso 🍅');
-      toast('Pomodoro registrado', 'ok');
+      if (!actividadDelPomodoro && registrado) toast('Pomodoro registrado', 'ok');
     }
     const longEvery = store.prefs.longEvery || 4;
     timer.mode = (timer.cycle % longEvery === 0 && timer.cycle > 0) ? 'long' : 'short';
@@ -898,6 +967,12 @@ async function completePhase(skipped) {
 
   saveTimer();
   if (app.route.name === 'focus' || app.route.name === 'today') renderView();
+
+  /* Con una actividad en foco, el cierre ofrece qué hacer con ella.
+     El descanso ya arrancó: la hoja no bloquea el temporizador. */
+  if (wasFocus && !skipped && registrado && actividadDelPomodoro) {
+    pomodoroDoneSheet(actividadDelPomodoro, minutes);
+  }
 }
 
 function notify(title, body) {
@@ -906,6 +981,138 @@ function notify(title, body) {
       new Notification(title, { body, icon: './icons/icon-192.png', badge: './icons/icon-192.png' });
     }
   } catch { /* ignora */ }
+}
+
+/* ==========================================================================
+   Cierre del pomodoro — qué hacer con la actividad
+   ========================================================================== */
+function pomodoroDoneSheet(activityId, minutes, { recuperado = false } = {}) {
+  const a = store.activity(activityId);
+  if (!a) return;
+
+  const pr = store.project(a.projectId);
+  const hechos = a.pomosDone || 0;
+  const est = a.pomosEstimated || 0;
+  const pct = est ? Math.min(1, hechos / est) : 0;
+
+  const accion = (id, ic, titulo, sub, clase = '') => `
+    <button class="list-row" data-pd="${id}">
+      <span class="tile-icon ${clase}" style="width:34px;height:34px;border-radius:10px;flex:0 0 auto">${icon(ic, 17)}</span>
+      <span class="col grow" style="align-items:flex-start;min-width:0;gap:1px">
+        <span style="font-size:14.5px;font-weight:550">${titulo}</span>
+        <span class="t-foot">${sub}</span>
+      </span>
+      ${icon('chevR', 14, 'chev')}
+    </button>`;
+
+  openSheet({
+    title: recuperado ? 'Pomodoro recuperado' : 'Pomodoro completado',
+    body: `
+      <div class="col center g-8 mb-16" style="text-align:center">
+        <div style="font-size:40px;line-height:1">🍅</div>
+        <div class="t-title-3">${minutes} min de enfoque</div>
+        <div class="t-sub">${esc(a.name)}${pr ? ` · ${esc(pr.name)}` : ''}</div>
+        ${recuperado ? `<div class="badge badge-orange">Se cumplió con la app cerrada</div>` : ''}
+      </div>
+
+      ${est ? `
+        <div class="col g-4 mb-16">
+          <div class="row between t-foot"><span>Pomodoros de esta actividad</span>
+            <span class="tnum">${hechos} / ${est}</span></div>
+          <div class="progress"><i style="width:${pct * 100}%;background:var(--red)"></i></div>
+          ${hechos >= est ? `<span class="t-foot" style="color:var(--orange)">Ya superaste lo estimado. ¿La cierras o reestimas?</span>` : ''}
+        </div>` : ''}
+
+      <div class="section-label">¿Qué hacer con la actividad?</div>
+      <div class="list">
+        ${accion('done', 'check', 'Completar actividad', 'Queda terminada y sale de la cola', 'bg-green')}
+        ${accion('resched', 'calendar', 'Reprogramar', a.dueDate ? `Vence ${fmtDue(a.dueDate)}` : 'Sin fecha límite', 'bg-orange')}
+        ${accion('edit', 'pencil', 'Editar actividad', 'Cambiar puntos, notas, responsable…', 'bg-blue')}
+        ${accion('keep', 'timer', 'Seguir con ella', 'Continúa en foco para el siguiente pomodoro', 'bg-gray')}
+        ${accion('release', 'inbox', 'Quitarla del foco', 'El pomodoro queda registrado igual', 'bg-gray')}
+      </div>`,
+    footer: `<button class="btn btn-gray" data-x="c">Cerrar</button>`,
+    onMount(el) {
+      $$('.bg-green', el).forEach(x => x.style.background = 'var(--green)');
+      $$('.bg-orange', el).forEach(x => x.style.background = 'var(--orange)');
+      $$('.bg-blue', el).forEach(x => x.style.background = 'var(--blue)');
+      $$('.bg-gray', el).forEach(x => { x.style.background = 'var(--surface-3)'; x.style.color = 'var(--label-2)'; });
+
+      $('[data-x="c"]', el).onclick = () => closeSheet();
+
+      $$('[data-pd]', el).forEach(b => b.onclick = async () => {
+        const accion = b.dataset.pd;
+
+        if (accion === 'done') {
+          const nueva = await store.setActivityStatus(a.id, 'done');
+          timer.activityId = null; saveTimer();
+          closeSheet();
+          toast(nueva ? `Completada · siguiente ${fmtDue(nueva.dueDate)}` : '¡Actividad completada!', 'ok', 2600);
+          renderView();
+          return;
+        }
+
+        if (accion === 'resched') { closeSheet(); rescheduleSheet(a.id); return; }
+
+        if (accion === 'edit') { closeSheet(); activityEditor(store.activity(a.id)); return; }
+
+        if (accion === 'release') {
+          timer.activityId = null; saveTimer();
+          closeSheet(); renderView();
+          toast('Actividad liberada del foco', 'ok', 1800);
+          return;
+        }
+
+        closeSheet();   // 'keep': se queda tal cual
+      });
+    }
+  });
+}
+
+/* ---------- Reprogramar con opciones rápidas ---------- */
+function rescheduleSheet(activityId) {
+  const a = store.activity(activityId);
+  if (!a) return;
+  const hoy = todayISO();
+
+  const opciones = [
+    { d: hoy,               label: 'Hoy' },
+    { d: addDays(hoy, 1),   label: 'Mañana' },
+    { d: addDays(hoy, 2),   label: 'Pasado mañana' },
+    { d: addDays(hoy, 7),   label: 'En una semana' }
+  ];
+
+  openSheet({
+    title: 'Reprogramar',
+    body: `
+      <p class="t-sub mb-16">${esc(a.name)}${a.dueDate ? ` · vence ${fmtDue(a.dueDate)}` : ' · sin fecha'}</p>
+      <div class="list mb-16">
+        ${opciones.map(o => `<button class="list-row" data-rs="${o.d}">
+          ${icon('calendar', 17)}
+          <span class="grow">${o.label}</span>
+          <span class="t-foot">${fmtDate(o.d)}</span>
+        </button>`).join('')}
+        ${a.dueDate ? `<button class="list-row" data-rs="">
+          ${icon('close', 17)}<span class="grow">Quitar la fecha</span>
+        </button>` : ''}
+      </div>
+      <div class="field"><label>O elige una fecha</label>
+        <input class="input" type="date" id="rs-date" value="${a.dueDate || ''}"></div>`,
+    footer: `<button class="btn btn-gray" data-x="c">Cancelar</button>
+             <button class="btn btn-primary" data-x="s">Guardar</button>`,
+    onMount(el) {
+      const aplicar = async (fecha) => {
+        const ok = await guardar(() => store.saveActivity({ ...store.activity(activityId), dueDate: fecha }));
+        if (!ok) return;
+        closeSheet();
+        toast(fecha ? `Reprogramada para ${fmtDue(fecha)}` : 'Fecha eliminada', 'ok', 2200);
+        renderView();
+      };
+      $$('[data-rs]', el).forEach(b => b.onclick = () => aplicar(b.dataset.rs));
+      $('[data-x="c"]', el).onclick = () => closeSheet();
+      $('[data-x="s"]', el).onclick = () => aplicar($('#rs-date', el).value);
+    }
+  });
 }
 
 function timerSettingsSheet() {
