@@ -13,7 +13,7 @@ import {
   IS_CONFIGURED, DEFAULT_TIMER
 } from './config.js';
 import {
-  icon, esc, $, $$, toast, openSheet, closeSheet, confirmSheet, openMenu,
+  icon, esc, $, $$, toast, openSheet, closeSheet, confirmSheet, promptSheet, openMenu,
   fmtDate, fmtDue, dueTone, fmtAgo, fmtTime, mmss, fmtDuration, todayISO,
   dayKey, addDays, daysBetween, avatar, ring, empty, makeDraggable, makeDropZone,
   chime, colorFor, initials
@@ -93,6 +93,14 @@ function saveTimer() {
 const modeSecs = (m) => (store.prefs[m] ?? DEFAULT_TIMER[m]) * 60;
 const MODE_NAME = { focus: 'Enfoque', short: 'Pausa corta', long: 'Pausa larga' };
 const MODE_COLOR = { focus: 'var(--red)', short: 'var(--green)', long: 'var(--teal)' };
+
+/* Duraciones de un toque. No todas las tareas piden 25 minutos: hay
+   revisiones de 5 y bloques profundos de 40. */
+const DURACIONES = {
+  focus: [5, 10, 15, 25, 40],
+  short: [3, 5, 10],
+  long:  [15, 20, 30]
+};
 
 /* ==========================================================================
    Navegación
@@ -715,6 +723,17 @@ function viewFocus() {
             <button class="${timer.mode === m ? 'active' : ''}" data-mode="${m}">${MODE_NAME[m]}</button>`).join('')}
         </div>
 
+        <div class="col g-6" style="align-items:center">
+          <div class="row g-6 wrap center">
+            ${DURACIONES[timer.mode].map(n => `
+              <button class="chip ${(store.prefs[timer.mode] ?? DEFAULT_TIMER[timer.mode]) === n ? 'on' : ''}"
+                data-dur="${n}" ${timer.running ? 'disabled style="opacity:.4"' : ''}>${n} min</button>`).join('')}
+            <button class="chip" data-dur-custom ${timer.running ? 'disabled style="opacity:.4"' : ''}
+              title="Otra duración">${icon('pencil', 13)}</button>
+          </div>
+          ${timer.running ? `<span class="t-cap">Pausa el temporizador para cambiar la duración</span>` : ''}
+        </div>
+
         <div class="timer-ring">
           ${ring(pct, 232, 9, MODE_COLOR[timer.mode])}
           <div class="timer-face">
@@ -796,6 +815,21 @@ function viewFocus() {
     body,
     mount(root) {
       $$('[data-mode]', root).forEach(b => b.onclick = () => setMode(b.dataset.mode));
+
+      $$('[data-dur]', root).forEach(b => b.onclick = () => setDuration(+b.dataset.dur));
+      $('[data-dur-custom]', root)?.addEventListener('click', async () => {
+        if (timer.running) return;
+        const v = await promptSheet({
+          title: `Duración de ${MODE_NAME[timer.mode].toLowerCase()}`,
+          label: 'Minutos',
+          value: String(store.prefs[timer.mode] ?? DEFAULT_TIMER[timer.mode]),
+          confirmText: 'Aplicar'
+        });
+        if (v === null) return;
+        const n = clampInt(v, 1, 180, 0);
+        if (!n) return toast('Escribe un número entre 1 y 180', 'err');
+        setDuration(n);
+      });
       $('[data-toggle]', root).onclick = () => { toggleTimer(); renderView(); };
       $('[data-reset]', root).onclick = () => { resetTimer(); renderView(); };
       $('[data-skip]', root).onclick = () => { completePhase(true); };
@@ -924,6 +958,17 @@ function resetTimer() {
   timer.endsAt = null;
   timer.remaining = modeSecs(timer.mode);
   saveTimer();
+}
+
+/** Cambia la duración del modo actual y reinicia la cuenta. */
+function setDuration(minutos) {
+  if (timer.running) return;              // no se toca un ciclo en curso
+  store.savePrefs({ [timer.mode]: minutos });
+  timer.remaining = modeSecs(timer.mode);
+  timer.endsAt = null;
+  saveTimer();
+  renderView();
+  toast(`${MODE_NAME[timer.mode]}: ${minutos} min`, 'ok', 1600);
 }
 
 async function completePhase(skipped) {
