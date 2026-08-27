@@ -100,6 +100,35 @@ export function daysBetween(a, b) {
   return Math.round((d2 - d1) / 86400000);
 }
 
+/**
+ * Duración en días de una actividad, contando inicio y fin inclusive:
+ * del 10 al 12 son 3 días de trabajo, no 2.
+ * @returns {number} 0 si no hay ventana definida
+ */
+export function durationDays(startDate, endDate) {
+  if (!startDate || !endDate) return 0;
+  const n = daysBetween(startDate, endDate) + 1;
+  return n > 0 ? n : 0;
+}
+
+/** "3 días" · "1 día" · "2 semanas" cuando la cifra es redonda */
+export function fmtDays(n) {
+  if (!n) return '';
+  if (n === 1) return '1 día';
+  if (n % 7 === 0 && n >= 14) return `${n / 7} semanas`;
+  if (n === 7) return '1 semana';
+  return `${n} días`;
+}
+
+/** Ventana de trabajo de un conjunto de actividades */
+export function workWindow(items) {
+  const starts = items.map(a => a.startDate).filter(Boolean).sort();
+  const ends = items.map(a => a.dueDate).filter(Boolean).sort();
+  const start = starts[0] || null;
+  const end = ends[ends.length - 1] || null;
+  return { start, end, days: durationDays(start, end) };
+}
+
 const MONTHS = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
 
 /** Fecha corta: "12 mar" o "12 mar 2024" si es otro año */

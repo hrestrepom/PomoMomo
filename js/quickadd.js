@@ -58,6 +58,8 @@ export function parse(raw, projects = []) {
   const tokens = [];
 
   let dueDate = '';
+  let startDate = '';
+  let durationDays = 0;
   let projectId = '';
   let projectName = '';
   let quadrant = 'Q2';
@@ -153,6 +155,14 @@ export function parse(raw, projects = []) {
     });
   }
 
+  /* --- Duración: "por 3 días", "durante 2 semanas" --- */
+  consumir(/\b(?:por|durante)\s+(\d+)\s+(d[ií]as?|semanas?|mes(?:es)?)\b/i, (m) => {
+    const n = parseInt(m[1], 10);
+    const u = norm(m[2]);
+    durationDays = /^semanas?$/.test(u) ? n * 7 : /^mes(es)?$/.test(u) ? n * 30 : n;
+    tokens.push({ tipo: 'duracion', texto: `${n} ${m[2]}` });
+  });
+
   /* --- Proyecto con #etiqueta --- */
   consumir(/#([^\s#]+)/, (m) => {
     const clave = norm(m[1]);
@@ -180,10 +190,17 @@ export function parse(raw, projects = []) {
     tokens.push({ tipo: 'fecha', texto: 'empieza hoy' });
   }
 
+  /* La duración define la ventana: la fecha detectada es el inicio y el
+     fin se calcula, salvo que no haya fecha, donde arranca hoy. */
+  if (durationDays > 0) {
+    startDate = dueDate || hoy;
+    dueDate = addDays(startDate, durationDays - 1);
+  }
+
   recur = withAnchor(recur, dueDate);
 
   const name = texto.replace(/\s+/g, ' ').trim();
-  return { name, dueDate, projectId, projectName, quadrant, recur, tokens };
+  return { name, startDate, dueDate, durationDays, projectId, projectName, quadrant, recur, tokens };
 }
 
 /* ==========================================================================

@@ -15,7 +15,8 @@ import {
 import {
   icon, esc, $, $$, toast, openSheet, closeSheet, confirmSheet, promptSheet, openMenu,
   fmtDate, fmtDue, dueTone, fmtAgo, fmtTime, mmss, fmtDuration, todayISO,
-  dayKey, addDays, daysBetween, avatar, ring, empty, makeDraggable, makeDropZone,
+  dayKey, addDays, daysBetween, durationDays, fmtDays, workWindow,
+  avatar, ring, empty, makeDraggable, makeDropZone,
   chime, colorFor, initials
 } from './ui.js';
 
@@ -515,6 +516,7 @@ function bindQuickAdd(root) {
 
   const TONO = {
     fecha:       'badge-blue',
+    duracion:    'badge-purple',
     proyecto:    'badge-purple',
     prioridad:   'badge-red',
     recurrencia: 'badge-green',
@@ -540,6 +542,7 @@ function bindQuickAdd(root) {
     preview.innerHTML = r.tokens.map(t => `
       <span class="badge ${TONO[t.tipo] || 'badge-gray'}">
         ${t.tipo === 'fecha' ? icon('calendar', 11)
+        : t.tipo === 'duracion' ? icon('clock', 11)
         : t.tipo === 'proyecto' ? icon('briefcase', 11)
         : t.tipo === 'recurrencia' ? icon('reset', 11)
         : t.tipo === 'prioridad' ? icon('fire', 11)
@@ -562,6 +565,7 @@ function bindQuickAdd(root) {
     await store.saveActivity({
       name: r.name,
       projectId: r.projectId,
+      startDate: r.startDate || '',
       deliverableIds: [],
       assigneeUid: store.user?.uid || '',
       quadrant: r.quadrant,
@@ -576,6 +580,7 @@ function bindQuickAdd(root) {
 
     const detalles = [
       r.dueDate ? fmtDue(r.dueDate) : null,
+      r.durationDays > 1 ? fmtDays(r.durationDays) : null,
       r.projectName || null,
       r.recur ? describeRecur(r.recur) : null
     ].filter(Boolean);
@@ -598,6 +603,7 @@ function bindQuickAdd(root) {
       <div class="list">
         ${[
           ['Fechas',      'hoy · mañana · pasado mañana · el viernes · en 3 días · 15 de marzo · 12/3'],
+          ['Duración',    'por 3 días · durante 2 semanas — la fecha detectada pasa a ser el inicio'],
           ['Proyecto',    '#familia · #negocio — busca por el inicio del nombre'],
           ['Urgente',     '! al final lo marca como Q1 (urgente e importante)'],
           ['Se repite',   'cada día · cada semana · cada mes · cada año · cada martes']
@@ -643,6 +649,8 @@ function actRow(a) {
       <span class="row g-6 wrap" style="font-size:11.5px;color:var(--label-3)">
         ${pr ? `<span class="row g-4"><i class="dot" style="background:${pr.color || 'var(--gray)'}"></i>${esc(pr.name)}</span>` : ''}
         ${a.dueDate ? `<span class="badge badge-${tone === 'red' ? 'red' : tone === 'orange' ? 'orange' : 'gray'}">${fmtDue(a.dueDate)}</span>` : ''}
+        ${(() => { const n = durationDays(a.startDate, a.dueDate);
+          return n > 1 ? `<span class="row g-3" title="Del ${fmtDate(a.startDate)} al ${fmtDate(a.dueDate)}">${icon('clock', 11)}${fmtDays(n)}</span>` : ''; })()}
         ${a.recur ? `<span class="row g-3" title="${esc(describeRecur(a.recur))}">${icon('reset', 11)}${esc(describeRecur(a.recur))}</span>` : ''}
         ${a.pomosEstimated ? `<span>🍅 ${a.pomosDone || 0}/${a.pomosEstimated}</span>` : ''}
       </span>
@@ -1477,6 +1485,29 @@ function viewProjectDetail({ id }) {
       <div class="stat"><span class="stat-label">Pomodoros</span><span class="stat-value">${st.pomos}</span><span class="stat-sub">de ${st.estPomos} estimados</span></div>
     </div>
 
+    ${(() => {
+      const conVentana = acts.filter(a => a.startDate && a.dueDate);
+      if (!conVentana.length) return '';
+      const w = workWindow(conVentana);
+      const esfuerzo = conVentana.reduce((n, a) => n + durationDays(a.startDate, a.dueDate), 0);
+      const abiertas = conVentana.filter(a => a.status !== 'done');
+      const esfuerzoAbierto = abiertas.reduce((n, a) => n + durationDays(a.startDate, a.dueDate), 0);
+      /* En los agregados se usan días llanos: comparar "21 d de esfuerzo"
+         contra "9 d de ventana" es inmediato; "3 semanas contra 9 días" no. */
+      const dias = (n) => n ? `${n} d` : '—';
+      return `<div class="card mb-24">
+        <div class="card-head"><span class="card-title">Tiempo de trabajo</span>
+          <span class="t-foot">${conVentana.length} de ${acts.length} actividades con duración</span></div>
+        <div class="row g-24 wrap">
+          <span class="tile-metric"><b>${dias(w.days)}</b><span>Ventana de calendario</span></span>
+          <span class="tile-metric"><b>${dias(esfuerzo)}</b><span>Esfuerzo acumulado</span></span>
+          <span class="tile-metric"><b>${dias(esfuerzoAbierto)}</b><span>Pendiente</span></span>
+        </div>
+        <p class="t-foot mt-8">${fmtDate(w.start)} → ${fmtDate(w.end)}${
+          esfuerzo > w.days ? ` · Solapamiento: ${esfuerzo} días de trabajo dentro de ${w.days} de calendario.` : ''}</p>
+      </div>`;
+    })()}
+
     ${pr.startDate || pr.dueDate ? `<div class="card mb-24">
       <div class="row between wrap g-12">
         <span class="t-sub">${icon('calendar', 14)} ${pr.startDate ? fmtDate(pr.startDate) : '—'} → ${pr.dueDate ? fmtDate(pr.dueDate) : '—'}</span>
@@ -2016,7 +2047,7 @@ function activityEditor(a = null) {
   const isNew = !a?.id;
   const cur = {
     name: '', projectId: '', deliverableIds: [], assigneeUid: store.user?.uid || '', quadrant: 'Q2',
-    status: 'todo', points: 3, pomosEstimated: 2, dueDate: '', notes: '', recur: null, ...a
+    status: 'todo', points: 3, pomosEstimated: 2, startDate: '', dueDate: '', notes: '', recur: null, ...a
   };
   const pfs = store.data.portfolios;
   const loose = store.data.projects.filter(p => !p.portfolioId);
@@ -2071,14 +2102,21 @@ function activityEditor(a = null) {
           <input class="input" type="number" id="a-pomos" min="0" max="40" value="${cur.pomosEstimated}"></div>
       </div>
 
-      <div class="grid grid-2 mt-16" style="gap:12px">
+      <div class="grid grid-3 mt-16" style="gap:12px">
+        <div class="field"><label>Inicio</label>
+          <input class="input" type="date" id="a-start" value="${cur.startDate || ''}"></div>
         <div class="field"><label>Fecha límite</label>
           <input class="input" type="date" id="a-due" value="${cur.dueDate || ''}"></div>
-        <div class="field"><label>Se repite</label>
-          <select class="select" id="a-recur">
-            ${RECUR_OPTIONS.map(o => `<option value="${o.value}" ${(cur.recur?.freq || '') === o.value ? 'selected' : ''}>${o.label}</option>`).join('')}
-          </select></div>
+        <div class="field"><label>Duración (días)</label>
+          <input class="input" type="number" id="a-days" min="1" max="999"
+            value="${durationDays(cur.startDate, cur.dueDate) || ''}" placeholder="—"></div>
       </div>
+      <p class="t-foot mt-4" id="a-span-hint"></p>
+
+      <div class="field mt-16"><label>Se repite</label>
+        <select class="select" id="a-recur">
+          ${RECUR_OPTIONS.map(o => `<option value="${o.value}" ${(cur.recur?.freq || '') === o.value ? 'selected' : ''}>${o.label}</option>`).join('')}
+        </select></div>
 
       <div class="field mt-16" id="a-deliv-wrap">
         <label>Entregables a los que contribuye <span class="muted-2">(opcional)</span></label>
@@ -2123,13 +2161,53 @@ function activityEditor(a = null) {
       fillDeliverables();
       projSel.addEventListener('change', fillDeliverables);
 
+      /* Inicio, fin y duración se mantienen coherentes entre sí:
+         se edita cualquiera de los tres y los otros se ajustan. */
+      const inStart = $('#a-start', el);
+      const inDue   = $('#a-due', el);
+      const inDays  = $('#a-days', el);
+      const hint    = $('#a-span-hint', el);
+
+      const pintarHint = () => {
+        const n = durationDays(inStart.value, inDue.value);
+        if (n) hint.textContent = `${fmtDays(n)} de trabajo, del ${fmtDate(inStart.value)} al ${fmtDate(inDue.value)}.`;
+        else if (inDue.value && !inStart.value) hint.textContent = 'Solo hay fecha límite. Agrega el inicio para saber cuántos días tomará.';
+        else if (inStart.value && !inDue.value) hint.textContent = 'Indica la duración o la fecha límite.';
+        else hint.textContent = '';
+      };
+
+      const sincronizarDesdeFechas = () => {
+        if (inStart.value && inDue.value) {
+          if (inDue.value < inStart.value) { inDue.value = inStart.value; }
+          inDays.value = durationDays(inStart.value, inDue.value) || '';
+        }
+        pintarHint();
+      };
+
+      inStart.addEventListener('change', () => {
+        // Con duración ya fijada, mover el inicio arrastra el fin
+        const n = parseInt(inDays.value, 10);
+        if (inStart.value && n > 0) inDue.value = addDays(inStart.value, n - 1);
+        sincronizarDesdeFechas();
+      });
+      inDue.addEventListener('change', sincronizarDesdeFechas);
+      inDays.addEventListener('input', () => {
+        const n = clampInt(inDays.value, 1, 999, 0);
+        if (!n) { pintarHint(); return; }
+        if (!inStart.value && inDue.value)      inStart.value = addDays(inDue.value, -(n - 1));
+        else if (inStart.value)                 inDue.value   = addDays(inStart.value, n - 1);
+        else { inStart.value = todayISO(); inDue.value = addDays(todayISO(), n - 1); }
+        pintarHint();
+      });
+      pintarHint();
+
       $('[data-x="c"]', el).onclick = () => closeSheet();
       $('[data-x="s"]', el).onclick = async (ev) => {
         const name = $('#a-name', el).value.trim();
         if (!name) return toast('Escribe el nombre de la actividad', 'err');
         const status = $('#a-status', el).value;
         const freq = $('#a-recur', el).value;
-        const due = $('#a-due', el).value;
+        const due = inDue.value;
         const recur = freq
           ? withAnchor({ ...(cur.recur || {}), freq, interval: cur.recur?.interval || 1 }, due)
           : null;
@@ -2146,6 +2224,7 @@ function activityEditor(a = null) {
           status,
           points: +$('#a-points', el).value,
           pomosEstimated: clampInt($('#a-pomos', el).value, 0, 40, 0),
+          startDate: inStart.value,
           dueDate: due,
           notes: $('#a-notes', el).value.trim(),
           recur,
@@ -2183,7 +2262,17 @@ function activityDetail(id) {
           <span class="badge badge-gray"><i class="dot" style="background:${STATUSES[a.status].color}"></i>${STATUSES[a.status].name}</span>
           ${a.points ? `<span class="badge badge-blue">${a.points} puntos</span>` : ''}
           ${a.dueDate ? `<span class="badge badge-${dueTone(a.dueDate, a.status) === 'red' ? 'red' : 'gray'}">${icon('calendar', 11)} ${fmtDate(a.dueDate)} · ${fmtDue(a.dueDate)}</span>` : ''}
+          ${(() => { const n = durationDays(a.startDate, a.dueDate);
+            return n ? `<span class="badge badge-purple">${icon('clock', 11)} ${fmtDays(n)}</span>` : ''; })()}
         </div>
+
+        ${a.startDate && a.dueDate ? `
+          <div class="list">
+            <div class="list-row">
+              <span class="grow t-sub">Ventana de trabajo</span>
+              <span style="font-size:13.5px">${fmtDate(a.startDate)} → ${fmtDate(a.dueDate)}</span>
+            </div>
+          </div>` : ''}
 
         <div class="list">
           <div class="list-row">
@@ -2582,6 +2671,27 @@ function viewMetrics() {
       </div>
     </div>
 
+    ${(() => {
+      const conVentana = acts.filter(a => a.startDate && a.dueDate && a.status !== 'done');
+      if (!conVentana.length) return '';
+      /* Próximos 21 días: cuántas actividades caen sobre cada uno.
+         Es lo que revela los días sobrecargados antes de que lleguen. */
+      const dias = Array.from({ length: 21 }, (_, i) => addDays(today, i));
+      const carga = dias.map(d => conVentana.filter(a => a.startDate <= d && a.dueDate >= d).length);
+      const pico = Math.max(...carga);
+      const diaPico = dias[carga.indexOf(pico)];
+      const ocupados = carga.filter(n => n > 0).length;
+      return `<div class="card mb-16">
+        <div class="card-head">
+          <span class="card-title">Actividades en curso por día · 21 días</span>
+          <span class="t-foot">${ocupados} días ocupados · pico de ${pico}</span>
+        </div>
+        <div class="chart-box"><canvas id="c-carga"></canvas></div>
+        ${pico >= 5 ? `<div class="banner banner-warn mt-8">${icon('warning', 16)}
+          <span>El ${fmtDate(diaPico)} tienes ${pico} actividades solapadas. Considera escalonarlas.</span></div>` : ''}
+      </div>`;
+    })()}
+
     <div class="grid grid-2">
       <div class="card">
         <div class="card-head"><span class="card-title">Carga por persona</span></div>
@@ -2646,6 +2756,17 @@ function viewMetrics() {
 
         const cf = $('#c-focus');   // ausente cuando no hay sesiones que mostrar
         if (cf) Chart.area(cf, { labels: dayLabels, values: minsByDay, color: '#FF3B30' }, 200);
+
+        const cc = $('#c-carga');   // solo si hay actividades con duración
+        if (cc) {
+          const conVentana = acts.filter(a => a.startDate && a.dueDate && a.status !== 'done');
+          const dias = Array.from({ length: 21 }, (_, i) => addDays(today, i));
+          Chart.bars(cc, {
+            labels: dias.map(d => d.slice(8) + '/' + d.slice(5, 7)),
+            values: dias.map(d => conVentana.filter(a => a.startDate <= d && a.dueDate >= d).length),
+            color: '#5856D6'
+          }, 200);
+        }
       };
 
       paint();
