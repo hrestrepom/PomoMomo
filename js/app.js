@@ -40,9 +40,29 @@ let timer = {
   remaining: DEFAULT_TIMER.focus * 60,
   endsAt: null,
   cycle: 0,
-  activityId: null
+  target: null          // { type: 'activity' | 'deliverable', id }
 };
 let tickHandle = null;
+
+/* ---------- Objetivo del foco: actividad o entregable ---------- */
+function setFocusTarget(type, id) {
+  timer.target = id ? { type, id } : null;
+  saveTimer();
+}
+
+/** Resuelve el objetivo actual a un objeto uniforme, o null si ya no existe. */
+function focusTarget() {
+  const t = timer.target;
+  if (!t?.id) return null;
+  if (t.type === 'deliverable') {
+    const d = store.deliverable(t.id);
+    return d ? { type: 'deliverable', id: d.id, name: d.name, obj: d,
+                 projectId: d.projectId, done: !!d.achieved } : null;
+  }
+  const a = store.activity(t.id);
+  return a ? { type: 'activity', id: a.id, name: a.name, obj: a,
+               projectId: a.projectId, done: a.status === 'done' } : null;
+}
 
 function loadTimer() {
   try {
@@ -50,6 +70,11 @@ function loadTimer() {
     if (!raw) return;
     const t = JSON.parse(raw);
     timer = { ...timer, ...t };
+
+    // Migración del formato anterior, que solo guardaba actividades
+    if (!timer.target && t.activityId) timer.target = { type: 'activity', id: t.activityId };
+    delete timer.activityId;
+
     if (timer.running && timer.endsAt) {
       const left = Math.round((timer.endsAt - Date.now()) / 1000);
       if (left <= 0) {
@@ -59,7 +84,7 @@ function loadTimer() {
            el pomodoro no aparecía nunca en las métricas. */
         timer.running = false;
         timer.endsAt = null;
-        timer.pending = { mode: timer.mode, activityId: timer.activityId, at: Date.now() };
+        timer.pending = { mode: timer.mode, target: timer.target, at: Date.now() };
         timer.remaining = modeSecs(timer.mode);
       } else {
         timer.remaining = left;
@@ -78,15 +103,16 @@ async function resolvePendingPomodoro() {
   if (p.mode !== 'focus') return;           // los descansos no se registran
 
   const minutes = store.prefs.focus ?? DEFAULT_TIMER.focus;
+  const objetivo = p.target || (p.activityId ? { type: 'activity', id: p.activityId } : null);
   // El contador solo avanza si el registro llegó a guardarse
-  const ok = await guardar(() => store.addPomodoro(p.activityId, minutes));
+  const ok = await guardar(() => store.addPomodoro(objetivo, minutes));
   if (!ok) return;
   timer.cycle += 1;
   saveTimer();
 
-  const a = p.activityId ? store.activity(p.activityId) : null;
-  toast(`Pomodoro recuperado${a ? ' · ' + a.name : ''}`, 'ok', 3200);
-  if (a) pomodoroDoneSheet(a.id, minutes, { recuperado: true });
+  const t = objetivo ? focusTarget() : null;
+  toast(`Pomodoro recuperado${t ? ' · ' + t.name : ''}`, 'ok', 3200);
+  if (t) pomodoroDoneSheet(objetivo, minutes, { recuperado: true });
 }
 function saveTimer() {
   try { localStorage.setItem(TKEY, JSON.stringify(timer)); } catch { /* ignora */ }
@@ -396,7 +422,8 @@ function viewToday() {
   const pomosToday = store.data.sessions.filter(s => dayKey(s.endedAt) === today);
   const minsToday = pomosToday.reduce((s, x) => s + (x.minutes || 0), 0);
 
-  const focusAct = timer.activityId ? store.activity(timer.activityId) : null;
+  const foco = focusTarget();
+  const delsHoy = store.actionableDeliverables(today);
 
   const hour = new Date().getHours();
   const greet = hour < 12 ? 'Buenos días' : hour < 19 ? 'Buenas tardes' : 'Buenas noches';
@@ -458,7 +485,7 @@ function viewToday() {
               <span class="t-title-3 tnum" id="todayClock">${mmss(timer.remaining)}</span>
               <span class="badge badge-gray">${MODE_NAME[timer.mode]}</span>
             </div>
-            <span class="t-foot truncate">${focusAct ? esc(focusAct.name) : 'Sin actividad seleccionada'}</span>
+            <span class="t-foot truncate">${foco ? esc(foco.name) : 'Sin selección'}</span>
           </div>
         </div>
         <div class="row g-8">
@@ -474,7 +501,20 @@ function viewToday() {
     ${section('Para hoy', dueToday, 'today')}
     ${section('En progreso', inProgress, 'bolt')}
 
-    ${!overdue.length && !dueToday.length && !inProgress.length ? `
+    ${delsHoy.length ? `
+      <section class="mt-24">
+        <div class="row between mb-8" style="padding:0 4px">
+          <div class="row g-8">
+            ${icon('flag', 16)}
+            <span class="t-head">Entregables en juego</span>
+            <span class="badge badge-gray">${delsHoy.length}</span>
+          </div>
+          <span class="t-cap">Los pasos con que cierras tus actividades</span>
+        </div>
+        <div class="list">${delsHoy.map(x => delivTodayRow(x)).join('')}</div>
+      </section>` : ''}
+
+    ${!overdue.length && !dueToday.length && !inProgress.length && !delsHoy.length ? `
       <div class="card mt-24">
         ${empty('check', 'Todo en orden', 'No tienes actividades vencidas ni programadas para hoy.',
           `<button class="btn btn-tinted mt-8" data-new-activity>${icon('plus', 15)} Nueva actividad</button>`)}
@@ -490,6 +530,33 @@ function viewToday() {
       $$('[data-timer-toggle]', root).forEach(b => b.onclick = () => { toggleTimer(); renderView(); });
     }
   };
+}
+
+/* ---------- Fila de entregable en la vista de Hoy ---------- */
+function delivTodayRow({ d, motivo, acts }) {
+  const pr = store.project(d.projectId);
+  const MOTIVO = {
+    'vencido':         { txt: 'Vencido', cls: 'badge-red' },
+    'hoy':             { txt: 'Para hoy', cls: 'badge-orange' },
+    'en-curso':        { txt: 'En curso', cls: 'badge-blue' },
+    'actividad-vence': { txt: 'La actividad vence', cls: 'badge-orange' }
+  }[motivo] || { txt: '', cls: 'badge-gray' };
+
+  return `<div class="act-row" data-deliv-row="${d.id}">
+    <button class="act-check" data-achieve="${d.id}" aria-label="Marcar como logrado">${icon('check', 13)}</button>
+
+    <button class="col grow" style="align-items:flex-start;min-width:0;gap:2px" data-open-deliv="${d.id}">
+      <span class="truncate w-full" style="font-size:14.5px;font-weight:500;text-align:left">${esc(d.name)}</span>
+      <span class="row g-6 wrap" style="font-size:11.5px;color:var(--label-3)">
+        ${pr ? `<span class="row g-4"><i class="dot" style="background:${pr.color || 'var(--gray)'}"></i>${esc(pr.name)}</span>` : ''}
+        <span class="badge ${MOTIVO.cls}">${MOTIVO.txt}</span>
+        ${d.pomosDone ? `<span>🍅 ${d.pomosDone}</span>` : ''}
+        ${acts.length ? `<span>${acts.length} actividad${acts.length === 1 ? '' : 'es'}</span>` : ''}
+      </span>
+    </button>
+
+    <button class="icon-btn accent" data-focus-deliv="${d.id}" title="Enfocar este entregable">${icon('timer', 16)}</button>
+  </div>`;
 }
 
 /* ---------- Captura rápida ---------- */
@@ -677,6 +744,21 @@ function bindActivityRows(root) {
     e.stopPropagation();
     activityMenu(b, b.dataset.actMenu);
   });
+
+  /* Subtareas que aparecen en Hoy */
+  $$('[data-achieve]', root).forEach(b => b.onclick = async (e) => {
+    e.stopPropagation();
+    const d = store.deliverable(b.dataset.achieve);
+    if (!d) return;
+    if (!await guardar(() => store.achieveDeliverable(d.id, !d.achieved))) return;
+    toast(d.achieved ? 'Logro retirado' : `🎉 ¡Logrado: ${d.name}!`, 'ok', 2200);
+  });
+  $$('[data-open-deliv]', root).forEach(b => b.onclick = () => deliverableDetail(b.dataset.openDeliv));
+  $$('[data-focus-deliv]', root).forEach(b => b.onclick = (e) => {
+    e.stopPropagation();
+    setFocusTarget('deliverable', b.dataset.focusDeliv);
+    go('focus');
+  });
 }
 
 function activityMenu(anchor, id) {
@@ -685,7 +767,7 @@ function activityMenu(anchor, id) {
   openMenu(anchor, [
     { label: 'Ver detalle', icon: 'info', onClick: () => activityDetail(id) },
     { label: 'Editar', icon: 'pencil', onClick: () => activityEditor(a) },
-    { label: 'Enfocar ahora', icon: 'timer', onClick: () => { timer.activityId = id; saveTimer(); go('focus'); } },
+    { label: 'Enfocar ahora', icon: 'timer', onClick: () => { setFocusTarget('activity', id); go('focus'); } },
     '-',
     { label: 'Asignar…', icon: 'user', onClick: () => assignSheet(id) },
     { label: 'Mover a…', icon: 'columns', onClick: () => statusSheet(id) },
@@ -703,12 +785,16 @@ function activityMenu(anchor, id) {
    Vista: Foco (Pomodoro)
    ========================================================================== */
 function viewFocus() {
-  const act = timer.activityId ? store.activity(timer.activityId) : null;
+  const foco = focusTarget();
   const total = modeSecs(timer.mode);
   const pct = 1 - timer.remaining / Math.max(1, total);
   const longEvery = store.prefs.longEvery || 4;
 
-  const queue = store.data.activities
+  const today = todayISO();
+
+  /* La cola mezcla actividades y entregables: los entregables son los
+     pasos concretos con los que se cierra una actividad. */
+  const acts = store.data.activities
     .filter(a => a.status !== 'done')
     .sort((a, b) => {
       const pa = ['Q1', 'Q3', 'Q2', 'Q4'].indexOf(a.quadrant);
@@ -716,9 +802,14 @@ function viewFocus() {
       if (pa !== pb) return pa - pb;
       return (a.dueDate || '9999').localeCompare(b.dueDate || '9999');
     })
-    .slice(0, 14);
+    .slice(0, 12);
 
-  const today = todayISO();
+  const dels = store.actionableDeliverables(today).slice(0, 10);
+
+  const queue = [
+    ...dels.map(x => ({ type: 'deliverable', obj: x.d, motivo: x.motivo, acts: x.acts })),
+    ...acts.map(a => ({ type: 'activity', obj: a }))
+  ];
   const todaySessions = store.data.sessions.filter(s => dayKey(s.endedAt) === today);
 
   const body = `
@@ -747,7 +838,7 @@ function viewFocus() {
           <div class="timer-face">
             <div class="timer-time" id="clock">${mmss(timer.remaining)}</div>
             <div class="timer-mode">${MODE_NAME[timer.mode]}</div>
-            ${act ? `<div class="timer-task truncate">${esc(act.name)}</div>` : `<div class="timer-task">Sin actividad</div>`}
+            ${foco ? `<div class="timer-task truncate">${esc(foco.name)}</div>` : `<div class="timer-task">Sin selección</div>`}
           </div>
         </div>
 
@@ -772,32 +863,19 @@ function viewFocus() {
       <div class="col g-16">
         <div class="card">
           <div class="card-head">
-            <span class="card-title">Actividad en foco</span>
-            ${act ? `<button class="icon-btn" data-focus-menu aria-label="Opciones">${icon('more', 16)}</button>` : ''}
+            <span class="card-title">En foco</span>
+            ${foco ? `<button class="icon-btn" data-focus-menu aria-label="Opciones">${icon('more', 16)}</button>` : ''}
           </div>
-          ${act ? focusActCard(act) : `<p class="t-sub">Elige una actividad de la lista para registrar los pomodoros en ella.</p>`}
+          ${foco ? focusCard(foco) : `<p class="t-sub">Elige una actividad o un entregable de la lista para registrar los pomodoros en él.</p>`}
         </div>
 
         <div class="card card-pad-0">
           <div class="row between" style="padding:16px 18px 10px">
-            <span class="card-title">Siguientes actividades</span>
+            <span class="card-title">Qué trabajar</span>
             <button class="btn btn-sm btn-tinted" data-new-activity>${icon('plus', 14)} Nueva</button>
           </div>
-          ${queue.length ? `<div>${queue.map(a => {
-            const pr = store.project(a.projectId);
-            const on = a.id === timer.activityId;
-            return `<button class="list-row ${on ? '' : ''}" data-pick="${a.id}"
-              style="${on ? 'background:var(--blue-t)' : ''}">
-              <span class="badge badge-${a.quadrant.toLowerCase()}">${a.quadrant}</span>
-              <span class="col grow" style="align-items:flex-start;min-width:0;gap:1px">
-                <span class="truncate w-full" style="font-size:14px;font-weight:500;text-align:left">${esc(a.name)}</span>
-                <span class="t-foot truncate w-full" style="text-align:left">
-                  ${pr ? esc(pr.name) : 'Sin proyecto'}${a.dueDate ? ' · ' + fmtDue(a.dueDate) : ''}
-                </span>
-              </span>
-              <span class="t-foot tnum">🍅 ${a.pomosDone || 0}/${a.pomosEstimated || 0}</span>
-            </button>`;
-          }).join('')}</div>` : empty('inbox', 'Sin actividades pendientes')}
+          ${queue.length ? `<div>${queue.map(q => queueRow(q)).join('')}</div>`
+            : empty('inbox', 'Nada pendiente')}
         </div>
 
         <div class="card">
@@ -805,12 +883,14 @@ function viewFocus() {
             <span class="t-foot">${fmtDuration(todaySessions.reduce((s, x) => s + (x.minutes || 0), 0))}</span>
           </div>
           ${todaySessions.length ? `<div class="timeline">${todaySessions.slice(0, 8).map(s => {
-            const a = store.activity(s.activityId);
+            const d = s.deliverableId ? store.deliverable(s.deliverableId) : null;
+            const a = !d && s.activityId ? store.activity(s.activityId) : null;
+            const nombre = d?.name || a?.name || 'Sesión de enfoque';
             return `<div class="tl-item">
-              <span class="tl-dot" style="background:var(--red-t);color:var(--red)">${icon('timer', 14)}</span>
+              <span class="tl-dot" style="background:var(--red-t);color:var(--red)">${icon(d ? 'flag' : 'timer', 14)}</span>
               <div class="tl-body">
-                <div class="tl-text">${a ? esc(a.name) : 'Sesión de enfoque'}</div>
-                <div class="tl-meta">${fmtTime(s.endedAt)} · ${s.minutes} min</div>
+                <div class="tl-text">${esc(nombre)}</div>
+                <div class="tl-meta">${fmtTime(s.endedAt)} · ${s.minutes} min${d ? ' · entregable' : ''}</div>
               </div>
             </div>`;
           }).join('')}</div>` : `<p class="t-sub">Aún no has registrado sesiones hoy.</p>`}
@@ -842,40 +922,137 @@ function viewFocus() {
       $('[data-reset]', root).onclick = () => { resetTimer(); renderView(); };
       $('[data-skip]', root).onclick = () => { completePhase(true); };
       $$('[data-pick]', root).forEach(b => b.onclick = () => {
-        timer.activityId = b.dataset.pick; saveTimer(); renderView();
+        setFocusTarget(b.dataset.pickType || 'activity', b.dataset.pick);
+        renderView();
       });
-      /* Acciones directas sobre la actividad en foco, sin ir a buscarla */
+
+      /* Acciones directas sobre lo que está en foco, sin ir a buscarlo */
       $$('[data-fa]', root).forEach(b => b.onclick = async () => {
-        const id = timer.activityId;
-        if (!id) return;
-        if (b.dataset.fa === 'done') {
-          const nueva = await store.setActivityStatus(id, 'done');
-          timer.activityId = null; saveTimer();
-          toast(nueva ? `Completada · siguiente ${fmtDue(nueva.dueDate)}` : '¡Actividad completada!', 'ok', 2400);
+        const t = focusTarget();
+        if (!t) return;
+        const accion = b.dataset.fa;
+
+        if (accion === 'done') {
+          if (t.type === 'deliverable') {
+            if (!await guardar(() => store.achieveDeliverable(t.id, true))) return;
+            setFocusTarget(null, null);
+            toast(`🎉 ¡Logrado: ${t.name}!`, 'ok', 2400);
+          } else {
+            const nueva = await store.setActivityStatus(t.id, 'done');
+            setFocusTarget(null, null);
+            toast(nueva ? `Completada · siguiente ${fmtDue(nueva.dueDate)}` : '¡Actividad completada!', 'ok', 2400);
+          }
           renderView();
-        } else if (b.dataset.fa === 'resched') {
-          rescheduleSheet(id);
+        } else if (accion === 'resched') {
+          t.type === 'deliverable' ? deliverableEditor(t.obj) : rescheduleSheet(t.id);
         } else {
-          activityEditor(store.activity(id));
+          t.type === 'deliverable' ? deliverableEditor(t.obj) : activityEditor(t.obj);
         }
       });
 
-      $('[data-focus-menu]', root)?.addEventListener('click', (e) => openMenu(e.currentTarget, [
-        { label: 'Ver detalle', icon: 'info', onClick: () => activityDetail(timer.activityId) },
-        { label: 'Editar', icon: 'pencil', onClick: () => activityEditor(store.activity(timer.activityId)) },
-        { label: 'Reprogramar', icon: 'calendar', onClick: () => rescheduleSheet(timer.activityId) },
-        '-',
-        { label: 'Quitar del foco', icon: 'inbox', onClick: () => {
-          timer.activityId = null; saveTimer(); renderView();
-          toast('Actividad liberada del foco', 'ok', 1600);
-        }}
-      ]));
+      $('[data-focus-menu]', root)?.addEventListener('click', (e) => {
+        const t = focusTarget();
+        if (!t) return;
+        const esDel = t.type === 'deliverable';
+        openMenu(e.currentTarget, [
+          { label: 'Ver detalle', icon: 'info',
+            onClick: () => esDel ? deliverableDetail(t.id) : activityDetail(t.id) },
+          { label: 'Editar', icon: 'pencil',
+            onClick: () => esDel ? deliverableEditor(t.obj) : activityEditor(t.obj) },
+          ...(esDel ? [] : [{ label: 'Reprogramar', icon: 'calendar', onClick: () => rescheduleSheet(t.id) }]),
+          '-',
+          { label: 'Quitar del foco', icon: 'inbox', onClick: () => {
+            setFocusTarget(null, null); renderView();
+            toast('Liberado del foco', 'ok', 1600);
+          }}
+        ]);
+      });
 
       $('[data-timer-settings]')?.addEventListener('click', timerSettingsSheet);
       $$('[data-new-activity]', root).forEach(b => b.onclick = () => activityEditor());
       $$('[data-open-act]', root).forEach(b => b.onclick = () => activityDetail(b.dataset.openAct));
+      $$('[data-open-deliv]', root).forEach(b => b.onclick = () => deliverableDetail(b.dataset.openDeliv));
     }
   };
+}
+
+/* ---------- Fila de la cola: actividad o entregable ---------- */
+function queueRow(q) {
+  const on = timer.target?.id === q.obj.id && timer.target?.type === q.type;
+  const pr = store.project(q.obj.projectId);
+  const estilo = on ? 'background:var(--blue-t)' : '';
+
+  if (q.type === 'deliverable') {
+    const d = q.obj;
+    const MOTIVO = {
+      'vencido':          { txt: 'Vencido', cls: 'badge-red' },
+      'hoy':              { txt: 'Para hoy', cls: 'badge-orange' },
+      'en-curso':         { txt: 'Actividad en curso', cls: 'badge-blue' },
+      'actividad-vence':  { txt: 'La actividad vence', cls: 'badge-orange' }
+    }[q.motivo] || { txt: '', cls: 'badge-gray' };
+
+    return `<button class="list-row" data-pick="${d.id}" data-pick-type="deliverable" style="${estilo}">
+      <span class="tile-icon" style="width:26px;height:26px;border-radius:8px;background:var(--purple-t);color:var(--purple);flex:0 0 auto">
+        ${icon('flag', 14)}</span>
+      <span class="col grow" style="align-items:flex-start;min-width:0;gap:1px">
+        <span class="truncate w-full" style="font-size:14px;font-weight:500;text-align:left">${esc(d.name)}</span>
+        <span class="t-foot truncate w-full" style="text-align:left">
+          ${pr ? esc(pr.name) : 'Sin proyecto'}${q.acts.length ? ` · ${q.acts.length} actividad${q.acts.length === 1 ? '' : 'es'}` : ''}
+        </span>
+      </span>
+      <span class="badge ${MOTIVO.cls}">${MOTIVO.txt}</span>
+      <span class="t-foot tnum">🍅 ${d.pomosDone || 0}</span>
+    </button>`;
+  }
+
+  const a = q.obj;
+  return `<button class="list-row" data-pick="${a.id}" data-pick-type="activity" style="${estilo}">
+    <span class="badge badge-${a.quadrant.toLowerCase()}">${a.quadrant}</span>
+    <span class="col grow" style="align-items:flex-start;min-width:0;gap:1px">
+      <span class="truncate w-full" style="font-size:14px;font-weight:500;text-align:left">${esc(a.name)}</span>
+      <span class="t-foot truncate w-full" style="text-align:left">
+        ${pr ? esc(pr.name) : 'Sin proyecto'}${a.dueDate ? ' · ' + fmtDue(a.dueDate) : ''}
+      </span>
+    </span>
+    <span class="t-foot tnum">🍅 ${a.pomosDone || 0}/${a.pomosEstimated || 0}</span>
+  </button>`;
+}
+
+/* ---------- Tarjeta de lo que está en foco ---------- */
+function focusCard(t) {
+  return t.type === 'deliverable' ? focusDeliverableCard(t.obj) : focusActCard(t.obj);
+}
+
+function focusDeliverableCard(d) {
+  const pr = store.project(d.projectId);
+  const pf = pr ? store.portfolio(pr.portfolioId) : null;
+  const acts = store.activitiesOfDeliverable(d.id);
+  const hechas = acts.filter(a => a.status === 'done').length;
+
+  return `
+    <div class="col g-12">
+      <button class="col g-4" style="align-items:flex-start;text-align:left" data-open-deliv="${d.id}">
+        <span class="row g-6">
+          <span class="badge badge-purple">${icon('flag', 11)} Entregable</span>
+        </span>
+        <span class="t-title-3">${esc(d.name)}</span>
+        <span class="t-foot">${pf ? esc(pf.name) + ' › ' : ''}${pr ? esc(pr.name) : 'Sin proyecto'}</span>
+      </button>
+
+      <div class="row g-6 wrap">
+        ${d.targetDate ? `<span class="badge badge-${dueTone(d.targetDate) === 'red' ? 'red' : 'gray'}">${icon('calendar', 11)} ${fmtDue(d.targetDate)}</span>` : ''}
+        <span class="badge badge-gray">🍅 ${d.pomosDone || 0} pomodoro${(d.pomosDone || 0) === 1 ? '' : 's'}</span>
+        ${acts.length ? `<span class="badge badge-gray">${hechas}/${acts.length} actividad${acts.length === 1 ? '' : 'es'}</span>` : ''}
+      </div>
+
+      ${d.desc ? `<div class="tl-note">${esc(d.desc)}</div>` : ''}
+
+      <div class="row g-8 wrap">
+        <button class="btn btn-sm btn-tinted" data-fa="done" style="background:var(--green-t);color:#248A3D">
+          ${icon('check', 14)} Marcar logrado</button>
+        <button class="btn btn-sm btn-gray" data-fa="edit">${icon('pencil', 14)} Editar</button>
+      </div>
+    </div>`;
 }
 
 function focusActCard(a) {
@@ -883,6 +1060,7 @@ function focusActCard(a) {
   const pf = pr ? store.portfolio(pr.portfolioId) : null;
   const m = store.member(a.assigneeUid);
   const pct = a.pomosEstimated ? Math.min(1, (a.pomosDone || 0) / a.pomosEstimated) : 0;
+  const dels = store.deliverablesOfActivity(a).filter(d => !d.achieved);
   return `
     <div class="col g-12">
       <button class="col g-4" style="align-items:flex-start;text-align:left" data-open-act="${a.id}">
@@ -902,6 +1080,19 @@ function focusActCard(a) {
         </div>` : ''}
       ${a.notes ? `<div class="tl-note">${esc(a.notes)}</div>` : ''}
 
+      ${dels.length ? `
+        <div class="col g-4">
+          <span class="t-cap">Entregables pendientes · toca para enfocarlo</span>
+          <div class="list">
+            ${dels.map(d => `<button class="list-row" data-pick="${d.id}" data-pick-type="deliverable">
+              ${icon('flag', 14)}
+              <span class="grow truncate" style="text-align:left;font-size:13.5px">${esc(d.name)}</span>
+              <span class="t-cap tnum">🍅 ${d.pomosDone || 0}</span>
+              ${icon('chevR', 13, 'chev')}
+            </button>`).join('')}
+          </div>
+        </div>` : ''}
+
       <div class="row g-8 wrap">
         <button class="btn btn-sm btn-tinted" data-fa="done" style="background:var(--green-t);color:#248A3D">
           ${icon('check', 14)} Completar</button>
@@ -909,6 +1100,61 @@ function focusActCard(a) {
         <button class="btn btn-sm btn-gray" data-fa="edit">${icon('pencil', 14)} Editar</button>
       </div>
     </div>`;
+}
+
+/* ---------- Detalle de un entregable ---------- */
+function deliverableDetail(id) {
+  const d = store.deliverable(id);
+  if (!d) return;
+  const pr = store.project(d.projectId);
+  const acts = store.activitiesOfDeliverable(d.id);
+  const hechas = acts.filter(a => a.status === 'done').length;
+  const sesiones = store.data.sessions.filter(s => s.deliverableId === d.id);
+  const minutos = sesiones.reduce((n, s) => n + (s.minutes || 0), 0);
+
+  openSheet({
+    title: 'Entregable',
+    size: 'lg',
+    body: `
+      <div class="t-title" style="line-height:1.3">${esc(d.name)}</div>
+      <div class="t-foot mt-4">${pr ? esc(pr.name) : 'Sin proyecto'}</div>
+
+      <div class="row g-6 wrap mt-16">
+        ${d.achieved ? `<span class="badge badge-green">${icon('check', 11)} Logrado ${fmtDate(d.achievedAt)}</span>`
+                     : `<span class="badge badge-gray">Pendiente</span>`}
+        ${d.targetDate ? `<span class="badge badge-${dueTone(d.targetDate, d.achieved ? 'done' : '') === 'red' ? 'red' : 'gray'}">${icon('calendar', 11)} ${fmtDate(d.targetDate)}</span>` : ''}
+        <span class="badge badge-gray">🍅 ${d.pomosDone || 0} pomodoro${(d.pomosDone || 0) === 1 ? '' : 's'}</span>
+        ${Math.round(minutos) >= 1 ? `<span class="badge badge-gray">${fmtDuration(minutos)} enfocados</span>` : ''}
+      </div>
+
+      ${d.desc ? `<div class="section-label mt-16">Descripción</div>
+        <div class="tl-note" style="margin-top:0">${esc(d.desc)}</div>` : ''}
+
+      <div class="section-label mt-16">Actividades que contribuyen · ${hechas}/${acts.length}</div>
+      ${acts.length ? `<div class="list">${acts.map(a => `
+        <button class="list-row" data-da="${a.id}">
+          <span class="act-check ${a.status === 'done' ? 'done' : ''}" style="pointer-events:none">${icon('check', 13)}</span>
+          <span class="grow truncate" style="text-align:left;font-size:14px">${esc(a.name)}</span>
+          <span class="badge badge-gray">${STATUSES[a.status]?.name || a.status}</span>
+        </button>`).join('')}</div>`
+      : `<p class="t-sub">Ninguna actividad está vinculada todavía.</p>`}`,
+    footer: `
+      <button class="btn btn-gray" data-x="edit">${icon('pencil', 15)} Editar</button>
+      <button class="btn btn-gray" data-x="focus">${icon('timer', 15)} Enfocar</button>
+      <button class="btn ${d.achieved ? 'btn-gray' : 'btn-primary'}" data-x="done">
+        ${icon('check', 15)} ${d.achieved ? 'Quitar logro' : 'Marcar logrado'}</button>`,
+    onMount(el) {
+      $$('[data-da]', el).forEach(b => b.onclick = () => { closeSheet(); activityDetail(b.dataset.da); });
+      $('[data-x="edit"]', el).onclick = () => { closeSheet(); deliverableEditor(store.deliverable(id)); };
+      $('[data-x="focus"]', el).onclick = () => { setFocusTarget('deliverable', id); closeSheet(); go('focus'); };
+      $('[data-x="done"]', el).onclick = async () => {
+        if (!await guardar(() => store.achieveDeliverable(id, !d.achieved))) return;
+        closeSheet();
+        toast(d.achieved ? 'Logro retirado' : `🎉 ¡Logrado: ${d.name}!`, 'ok', 2400);
+        renderView();
+      };
+    }
+  });
 }
 
 /* ---------- Motor del temporizador ---------- */
@@ -986,17 +1232,17 @@ async function completePhase(skipped) {
   timer.running = false;
   timer.endsAt = null;
 
-  const actividadDelPomodoro = timer.activityId;
+  const objetivoDelPomodoro = timer.target;
 
   let registrado = false;
 
   if (wasFocus) {
     if (!skipped) {
-      registrado = await guardar(() => store.addPomodoro(actividadDelPomodoro, minutes));
+      registrado = await guardar(() => store.addPomodoro(objetivoDelPomodoro, minutes));
       if (registrado) timer.cycle += 1;   // solo cuenta lo que quedó guardado
       if (store.prefs.sound) chime('done');
       notify('Pomodoro completado', 'Tómate un descanso 🍅');
-      if (!actividadDelPomodoro && registrado) toast('Pomodoro registrado', 'ok');
+      if (!objetivoDelPomodoro && registrado) toast('Pomodoro registrado', 'ok');
     }
     const longEvery = store.prefs.longEvery || 4;
     timer.mode = (timer.cycle % longEvery === 0 && timer.cycle > 0) ? 'long' : 'short';
@@ -1023,8 +1269,8 @@ async function completePhase(skipped) {
 
   /* Con una actividad en foco, el cierre ofrece qué hacer con ella.
      El descanso ya arrancó: la hoja no bloquea el temporizador. */
-  if (wasFocus && !skipped && registrado && actividadDelPomodoro) {
-    pomodoroDoneSheet(actividadDelPomodoro, minutes);
+  if (wasFocus && !skipped && registrado && objetivoDelPomodoro) {
+    pomodoroDoneSheet(objetivoDelPomodoro, minutes);
   }
 }
 
@@ -1037,16 +1283,21 @@ function notify(title, body) {
 }
 
 /* ==========================================================================
-   Cierre del pomodoro — qué hacer con la actividad
+   Cierre del pomodoro — qué hacer con lo que estabas trabajando
    ========================================================================== */
-function pomodoroDoneSheet(activityId, minutes, { recuperado = false } = {}) {
-  const a = store.activity(activityId);
+function pomodoroDoneSheet(target, minutes, { recuperado = false } = {}) {
+  const t = Store.normalizeTarget(target);
+  if (!t) return;
+
+  const esEntregable = t.type === 'deliverable';
+  const a = esEntregable ? store.deliverable(t.id) : store.activity(t.id);
   if (!a) return;
 
   const pr = store.project(a.projectId);
   const hechos = a.pomosDone || 0;
-  const est = a.pomosEstimated || 0;
+  const est = esEntregable ? 0 : (a.pomosEstimated || 0);
   const pct = est ? Math.min(1, hechos / est) : 0;
+  const QUE = esEntregable ? 'el entregable' : 'la actividad';
 
   const accion = (id, ic, titulo, sub, clase = '') => `
     <button class="list-row" data-pd="${id}">
@@ -1074,15 +1325,23 @@ function pomodoroDoneSheet(activityId, minutes, { recuperado = false } = {}) {
             <span class="tnum">${hechos} / ${est}</span></div>
           <div class="progress"><i style="width:${pct * 100}%;background:var(--red)"></i></div>
           ${hechos >= est ? `<span class="t-foot" style="color:var(--orange)">Ya superaste lo estimado. ¿La cierras o reestimas?</span>` : ''}
+        </div>`
+      : esEntregable ? `
+        <div class="row between t-foot mb-16">
+          <span>Pomodoros en este entregable</span><span class="tnum">${hechos}</span>
         </div>` : ''}
 
-      <div class="section-label">¿Qué hacer con la actividad?</div>
+      <div class="section-label">¿Qué hacer con ${QUE}?</div>
       <div class="list">
-        ${accion('done', 'check', 'Completar actividad', 'Queda terminada y sale de la cola', 'bg-green')}
-        ${accion('resched', 'calendar', 'Reprogramar', a.dueDate ? `Vence ${fmtDue(a.dueDate)}` : 'Sin fecha límite', 'bg-orange')}
-        ${accion('edit', 'pencil', 'Editar actividad', 'Cambiar puntos, notas, responsable…', 'bg-blue')}
-        ${accion('keep', 'timer', 'Seguir con ella', 'Continúa en foco para el siguiente pomodoro', 'bg-gray')}
-        ${accion('release', 'inbox', 'Quitarla del foco', 'El pomodoro queda registrado igual', 'bg-gray')}
+        ${esEntregable
+          ? accion('done', 'check', 'Marcar como logrado', 'Queda registrado con la fecha de hoy', 'bg-green')
+          : accion('done', 'check', 'Completar actividad', 'Queda terminada y sale de la cola', 'bg-green')}
+        ${accion('resched', 'calendar', 'Reprogramar',
+            (esEntregable ? a.targetDate : a.dueDate) ? `Vence ${fmtDue(esEntregable ? a.targetDate : a.dueDate)}` : 'Sin fecha', 'bg-orange')}
+        ${accion('edit', 'pencil', esEntregable ? 'Editar entregable' : 'Editar actividad',
+            esEntregable ? 'Cambiar nombre, descripción o fecha' : 'Cambiar puntos, notas, responsable…', 'bg-blue')}
+        ${accion('keep', 'timer', 'Seguir con esto', 'Continúa en foco para el siguiente pomodoro', 'bg-gray')}
+        ${accion('release', 'inbox', 'Quitarlo del foco', 'El pomodoro queda registrado igual', 'bg-gray')}
       </div>`,
     footer: `<button class="btn btn-gray" data-x="c">Cerrar</button>`,
     onMount(el) {
@@ -1097,22 +1356,38 @@ function pomodoroDoneSheet(activityId, minutes, { recuperado = false } = {}) {
         const accion = b.dataset.pd;
 
         if (accion === 'done') {
-          const nueva = await store.setActivityStatus(a.id, 'done');
-          timer.activityId = null; saveTimer();
-          closeSheet();
-          toast(nueva ? `Completada · siguiente ${fmtDue(nueva.dueDate)}` : '¡Actividad completada!', 'ok', 2600);
+          if (esEntregable) {
+            const ok = await guardar(() => store.achieveDeliverable(a.id, true));
+            if (!ok) return;
+            setFocusTarget(null, null);
+            closeSheet();
+            toast(`🎉 ¡Logrado: ${a.name}!`, 'ok', 2600);
+          } else {
+            const nueva = await store.setActivityStatus(a.id, 'done');
+            setFocusTarget(null, null);
+            closeSheet();
+            toast(nueva ? `Completada · siguiente ${fmtDue(nueva.dueDate)}` : '¡Actividad completada!', 'ok', 2600);
+          }
           renderView();
           return;
         }
 
-        if (accion === 'resched') { closeSheet(); rescheduleSheet(a.id); return; }
+        if (accion === 'resched') {
+          closeSheet();
+          esEntregable ? deliverableEditor(store.deliverable(a.id)) : rescheduleSheet(a.id);
+          return;
+        }
 
-        if (accion === 'edit') { closeSheet(); activityEditor(store.activity(a.id)); return; }
+        if (accion === 'edit') {
+          closeSheet();
+          esEntregable ? deliverableEditor(store.deliverable(a.id)) : activityEditor(store.activity(a.id));
+          return;
+        }
 
         if (accion === 'release') {
-          timer.activityId = null; saveTimer();
+          setFocusTarget(null, null);
           closeSheet(); renderView();
-          toast('Actividad liberada del foco', 'ok', 1800);
+          toast('Liberado del foco', 'ok', 1800);
           return;
         }
 
@@ -1605,26 +1880,28 @@ function sprintsSection(pr) {
    Entregables — el registro de logros reales
    ========================================================================== */
 function deliverablesSection(pr) {
-  const list = store.deliverablesOf(pr.id);
-  const logrados = list.filter(d => d.achieved).length;
+  const todos = store.deliverablesOf(pr.id);
+  const entregables = todos.filter(d => (d.kind || 'entregable') === 'entregable');
+  const logrados = entregables.filter(d => d.achieved).length;
 
   return `
     <div class="row between mb-8" style="padding:0 4px">
       <span class="row g-8">
         <span class="t-head">Entregables</span>
-        ${list.length ? `<span class="badge badge-gray">${logrados}/${list.length} logrados</span>` : ''}
+        ${entregables.length ? `<span class="badge badge-gray">${logrados}/${entregables.length} logrados</span>` : ''}
       </span>
       <button class="btn btn-sm btn-tinted" data-new-deliv>${icon('plus', 14)} Nuevo</button>
     </div>
 
-    ${list.length ? `<div class="list mb-24">${list.map(d => deliverableRow(d)).join('')}</div>`
+    ${entregables.length ? `<div class="list mb-24">${entregables.map(d => deliverableRow(d)).join('')}</div>`
       : `<div class="card mb-24" style="padding:16px">
           <div class="row g-12">
             ${icon('flag', 20)}
             <span class="col grow">
               <span class="t-head">Sin entregables</span>
-              <span class="t-sub">Un entregable es un resultado tangible: «Bici arreglada», «Contrato firmado»,
-              «Viaje planeado». Las actividades son el camino; el entregable es el logro.</span>
+              <span class="t-sub">Un entregable es una subtarea que deja un resultado tangible:
+              «Bici arreglada», «Contrato firmado». Se crean dentro de una actividad o sueltos aquí,
+              y sobre cada uno puedes correr pomodoros.</span>
             </span>
             <button class="btn btn-sm btn-primary" data-new-deliv style="flex:0 0 auto">Crear</button>
           </div>
@@ -1636,18 +1913,22 @@ function deliverableRow(d) {
   const hechas = acts.filter(a => a.status === 'done').length;
   const pct = acts.length ? Math.round(hechas / acts.length * 100) : 0;
   const tone = dueTone(d.targetDate, d.achieved ? 'done' : '');
+  const dueña = d.activityId ? store.activity(d.activityId) : null;
 
   return `<div class="list-row">
     <button class="act-check ${d.achieved ? 'done' : ''}" data-achieve="${d.id}"
       aria-label="${d.achieved ? 'Quitar logro' : 'Marcar como logrado'}">${icon('check', 13)}</button>
 
     <button class="col grow" style="align-items:flex-start;min-width:0;gap:3px;text-align:left"
-      data-edit-deliv="${d.id}">
+      data-open-deliv="${d.id}">
       <span class="row g-6 w-full">
         <span class="truncate" style="font-size:14.5px;font-weight:550;${d.achieved ? 'color:var(--label-2)' : ''}">${esc(d.name)}</span>
         ${d.achieved ? `<span class="badge badge-green">${icon('check', 10)} ${fmtDate(d.achievedAt)}</span>` : ''}
       </span>
-      ${d.desc ? `<span class="t-foot truncate w-full">${esc(d.desc)}</span>` : ''}
+      <span class="row g-6 wrap" style="font-size:11.5px;color:var(--label-3)">
+        ${dueña ? `<span class="row g-4">${icon('checklist', 11)} ${esc(dueña.name)}</span>` : ''}
+        ${d.pomosDone ? `<span>🍅 ${d.pomosDone}</span>` : ''}
+      </span>
       ${acts.length ? `<span class="row g-6 w-full" style="max-width:220px">
           <span class="progress grow" style="height:4px"><i style="width:${pct}%;background:${d.achieved ? 'var(--green)' : 'var(--blue)'}"></i></span>
           <span class="t-cap tnum">${hechas}/${acts.length}</span>
@@ -1657,6 +1938,7 @@ function deliverableRow(d) {
     ${d.targetDate && !d.achieved
       ? `<span class="badge badge-${tone === 'red' ? 'red' : tone === 'orange' ? 'orange' : 'gray'}">${fmtDue(d.targetDate)}</span>`
       : ''}
+    ${!d.achieved ? `<button class="icon-btn accent" data-focus-deliv="${d.id}" title="Enfocar">${icon('timer', 15)}</button>` : ''}
     <button class="icon-btn" data-deliv-menu="${d.id}" aria-label="Opciones">${icon('more', 16)}</button>
   </div>`;
 }
@@ -1668,18 +1950,26 @@ function bindDeliverables(root, projectId) {
     e.stopPropagation();
     const d = store.deliverable(b.dataset.achieve);
     if (!d) return;
-    await store.achieveDeliverable(d.id, !d.achieved);
+    if (!await guardar(() => store.achieveDeliverable(d.id, !d.achieved))) return;
     toast(d.achieved ? 'Logro retirado' : `🎉 ¡Logrado: ${d.name}!`, 'ok', 2400);
   });
 
+  $$('[data-open-deliv]', root).forEach(b => b.onclick = () => deliverableDetail(b.dataset.openDeliv));
   $$('[data-edit-deliv]', root).forEach(b => b.onclick = () => deliverableEditor(store.deliverable(b.dataset.editDeliv)));
+  $$('[data-focus-deliv]', root).forEach(b => b.onclick = (e) => {
+    e.stopPropagation();
+    setFocusTarget('deliverable', b.dataset.focusDeliv);
+    go('focus');
+  });
 
   $$('[data-deliv-menu]', root).forEach(b => b.onclick = (e) => {
     e.stopPropagation();
     const d = store.deliverable(b.dataset.delivMenu);
     if (!d) return;
     openMenu(b, [
+      { label: 'Ver detalle', icon: 'info', onClick: () => deliverableDetail(d.id) },
       { label: 'Editar', icon: 'pencil', onClick: () => deliverableEditor(d) },
+      { label: 'Enfocar ahora', icon: 'timer', onClick: () => { setFocusTarget('deliverable', d.id); go('focus'); } },
       { label: d.achieved ? 'Quitar logro' : 'Marcar como logrado', icon: 'check',
         onClick: () => store.achieveDeliverable(d.id, !d.achieved) },
       { label: 'Nueva actividad para esto', icon: 'plus',
@@ -1700,15 +1990,35 @@ function bindDeliverables(root, projectId) {
 
 function deliverableEditor(d = null) {
   const isNew = !d?.id;
-  const cur = { name: '', desc: '', targetDate: '', projectId: '', ...d };
+  const cur = { name: '', desc: '', targetDate: '', projectId: '', activityId: '', kind: 'entregable', ...d };
+  const actsProyecto = store.activitiesOf(cur.projectId);
 
   openSheet({
-    title: isNew ? 'Nuevo entregable' : 'Editar entregable',
+    title: isNew ? 'Nueva subtarea' : 'Editar subtarea',
     body: `
-      <div class="field"><label>¿Qué resultado tangible quieres lograr?</label>
+      <div class="field"><label>Tipo</label>
+        <div class="quad-pick">
+          <button type="button" class="quad-opt ${cur.kind === 'entregable' ? 'on' : ''}" data-kind="entregable"
+            style="--qc:var(--purple);--qt:var(--purple-t)">
+            <b>Entregable</b><span>Produce algo tangible. Cuenta como logro.</span>
+          </button>
+          <button type="button" class="quad-opt ${cur.kind === 'paso' ? 'on' : ''}" data-kind="paso"
+            style="--qc:var(--gray);--qt:var(--gray-t)">
+            <b>Paso</b><span>Solo un avance intermedio.</span>
+          </button>
+        </div></div>
+
+      <div class="field mt-16"><label id="dl-label">¿Qué resultado tangible quieres lograr?</label>
         <input class="input" id="dl-name" value="${esc(cur.name)}"
           placeholder="Ej. Bici arreglada · Contrato firmado · Viaje planeado"></div>
-      <p class="t-foot mt-4">Escríbelo como un resultado ya conseguido, no como una tarea.</p>
+      <p class="t-foot mt-4" id="dl-hint">Escríbelo como un resultado ya conseguido, no como una tarea.</p>
+
+      ${actsProyecto.length ? `
+        <div class="field mt-16"><label>Pertenece a la actividad <span class="muted-2">(opcional)</span></label>
+          <select class="select" id="dl-activity">
+            <option value="">Suelta en el proyecto</option>
+            ${actsProyecto.map(a => `<option value="${a.id}" ${cur.activityId === a.id ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}
+          </select></div>` : ''}
 
       <div class="field mt-16"><label>Descripción <span class="muted-2">(opcional)</span></label>
         <textarea class="textarea" id="dl-desc" placeholder="¿Cómo sabrás que está logrado?">${esc(cur.desc)}</textarea></div>
@@ -1718,16 +2028,38 @@ function deliverableEditor(d = null) {
     footer: `<button class="btn btn-gray" data-x="c">Cancelar</button>
              <button class="btn btn-primary" data-x="s">${isNew ? 'Crear' : 'Guardar'}</button>`,
     onMount(el) {
+      let kind = cur.kind;
+      const label = $('#dl-label', el), hint = $('#dl-hint', el), nombre = $('#dl-name', el);
+      const pintarTipo = () => {
+        if (kind === 'paso') {
+          label.textContent = '¿Qué paso hay que dar?';
+          hint.textContent = 'Un paso avanza la actividad pero no deja un resultado registrable.';
+          nombre.placeholder = 'Ej. Llamar al proveedor · Revisar el borrador';
+        } else {
+          label.textContent = '¿Qué resultado tangible quieres lograr?';
+          hint.textContent = 'Escríbelo como un resultado ya conseguido, no como una tarea.';
+          nombre.placeholder = 'Ej. Bici arreglada · Contrato firmado · Viaje planeado';
+        }
+      };
+      pintarTipo();
+      $$('[data-kind]', el).forEach(b => b.onclick = () => {
+        kind = b.dataset.kind;
+        $$('[data-kind]', el).forEach(x => x.classList.toggle('on', x === b));
+        pintarTipo();
+      });
+
       $('[data-x="c"]', el).onclick = () => closeSheet();
       $('[data-x="s"]', el).onclick = async (ev) => {
-        const name = $('#dl-name', el).value.trim();
-        if (!name) return toast('Escribe el entregable', 'err');
+        const name = nombre.value.trim();
+        if (!name) return toast('Escribe el nombre', 'err');
 
         const btn = ev.currentTarget;
         btn.disabled = true;
         const ok = await guardar(() => store.saveDeliverable({
           ...(d?.id ? { id: d.id } : {}),   // el resto lo conserva saveDeliverable
           projectId: cur.projectId,
+          activityId: $('#dl-activity', el)?.value ?? cur.activityId,
+          kind,
           name,
           desc: $('#dl-desc', el).value.trim(),
           targetDate: $('#dl-date', el).value
@@ -1735,7 +2067,7 @@ function deliverableEditor(d = null) {
         btn.disabled = false;
         if (!ok) return;   // se mantiene abierta para no perder lo escrito
         closeSheet();
-        toast(isNew ? 'Entregable creado' : 'Guardado', 'ok');
+        toast(isNew ? 'Subtarea creada' : 'Guardado', 'ok');
       };
     }
   });
@@ -2295,16 +2627,45 @@ function activityDetail(id) {
         </div>
 
         ${(() => {
-          const dels = store.deliverablesOfActivity(a);
-          if (!dels.length) return '';
+          const subs = store.subtasksOf(a.id);
+          const hechas = subs.filter(s => s.achieved).length;
+          return `<div>
+            <div class="section-label">Subtareas${subs.length ? ` · ${hechas}/${subs.length}` : ''}</div>
+            ${subs.length ? `
+              <div class="progress progress-sm mb-8"><i style="width:${subs.length ? hechas / subs.length * 100 : 0}%;background:var(--green)"></i></div>
+              <div class="list mb-8">${subs.map(s => `
+                <div class="list-row">
+                  <button class="act-check ${s.achieved ? 'done' : ''}" data-sub-done="${s.id}"
+                    aria-label="Completar subtarea">${icon('check', 13)}</button>
+                  <button class="col grow" style="align-items:flex-start;min-width:0;gap:1px" data-sub-open="${s.id}">
+                    <span class="truncate w-full" style="text-align:left;font-size:14px;${s.achieved ? 'color:var(--label-3);text-decoration:line-through' : ''}">${esc(s.name)}</span>
+                    <span class="row g-6" style="font-size:11px;color:var(--label-3)">
+                      <span class="badge ${s.kind === 'paso' ? 'badge-gray' : 'badge-purple'}">${s.kind === 'paso' ? 'Paso' : 'Entregable'}</span>
+                      ${s.pomosDone ? `<span>🍅 ${s.pomosDone}</span>` : ''}
+                      ${s.targetDate ? `<span>${fmtDue(s.targetDate)}</span>` : ''}
+                    </span>
+                  </button>
+                  <button class="icon-btn accent" data-sub-focus="${s.id}" title="Enfocar">${icon('timer', 15)}</button>
+                </div>`).join('')}</div>` : ''}
+            <div class="row g-8">
+              <input class="input grow" id="d-subtask" placeholder="Agregar subtarea y pulsar Enter…">
+              <button class="btn btn-primary" data-d="addsub">${icon('plus', 15)}</button>
+            </div>
+            <p class="t-foot mt-4">Se crea como entregable. Cámbialo a «paso» si no produce nada tangible.</p>
+          </div>`;
+        })()}
+
+        ${(() => {
+          const otros = store.deliverablesOfActivity(a).filter(d => d.activityId !== a.id);
+          if (!otros.length) return '';
           return `<div>
             <div class="section-label">Contribuye a</div>
-            <div class="list">${dels.map(d => `
-              <div class="list-row">
+            <div class="list">${otros.map(d => `
+              <button class="list-row" data-sub-open="${d.id}">
                 <span class="act-check ${d.achieved ? 'done' : ''}" style="pointer-events:none">${icon('check', 13)}</span>
-                <span class="grow truncate">${esc(d.name)}</span>
+                <span class="grow truncate" style="text-align:left">${esc(d.name)}</span>
                 ${d.achieved ? `<span class="badge badge-green">${fmtDate(d.achievedAt)}</span>` : ''}
-              </div>`).join('')}</div>
+              </button>`).join('')}</div>
           </div>`;
         })()}
 
@@ -2341,12 +2702,43 @@ function activityDetail(id) {
     };
     $('[data-d="comment"]', el)?.addEventListener('click', send);
     ci?.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+
+    /* --- Subtareas --- */
+    const si = $('#d-subtask', el);
+    const addSub = async () => {
+      const v = si.value.trim();
+      if (!v) return;
+      const a = store.activity(id);
+      const ok = await guardar(() => store.saveDeliverable({
+        activityId: id, projectId: a?.projectId || '', name: v, kind: 'entregable'
+      }));
+      if (!ok) return;
+      si.value = '';
+      refresh();
+    };
+    $('[data-d="addsub"]', el)?.addEventListener('click', addSub);
+    si?.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addSub(); } });
+
+    $$('[data-sub-done]', el).forEach(b => b.onclick = async () => {
+      const s = store.deliverable(b.dataset.subDone);
+      if (!s) return;
+      if (!await guardar(() => store.achieveDeliverable(s.id, !s.achieved))) return;
+      refresh();
+      if (!s.achieved) toast(`🎉 ${s.name}`, 'ok', 1800);
+    });
+
+    $$('[data-sub-open]', el).forEach(b => b.onclick = () => { closeSheet(); deliverableDetail(b.dataset.subOpen); });
+
+    $$('[data-sub-focus]', el).forEach(b => b.onclick = () => {
+      setFocusTarget('deliverable', b.dataset.subFocus);
+      closeSheet(); go('focus');
+    });
   };
 
   /* El pie NO se regenera: se vincula una sola vez para no duplicar listeners. */
   const bindFooter = (sheetEl) => {
     $('[data-d="edit"]', sheetEl)?.addEventListener('click', () => { closeSheet(); activityEditor(store.activity(id)); });
-    $('[data-d="focus"]', sheetEl)?.addEventListener('click', () => { timer.activityId = id; saveTimer(); closeSheet(); go('focus'); });
+    $('[data-d="focus"]', sheetEl)?.addEventListener('click', () => { setFocusTarget('activity', id); closeSheet(); go('focus'); });
     $('[data-d="done"]', sheetEl)?.addEventListener('click', async () => {
       const a = store.activity(id);
       if (!a) return;

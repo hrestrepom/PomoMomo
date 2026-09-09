@@ -677,17 +677,33 @@ export class Store extends Emitter {
   /* ======================================================================
      Entregables — resultados tangibles que se marcan como logrados
      ====================================================================== */
+  /**
+   * Subtarea de una actividad. `kind` distingue las dos formas:
+   *   entregable → produce algo tangible y cuenta como logro
+   *   paso       → solo un paso para avanzar
+   * `activityId` vacío = subtarea suelta a nivel de proyecto.
+   */
   async saveDeliverable(d) {
     const prev = d.id ? this.deliverable(d.id) : null;
     return this._put('deliverables', {
       ...d,
+      kind:       d.kind ?? prev?.kind ?? 'entregable',
+      activityId: d.activityId ?? prev?.activityId ?? '',
       desc:       d.desc ?? prev?.desc ?? '',
       targetDate: d.targetDate ?? prev?.targetDate ?? '',
       achieved:   d.achieved ?? prev?.achieved ?? false,
       achievedAt: d.achievedAt ?? prev?.achievedAt ?? null,
+      order:      d.order ?? prev?.order ?? Date.now(),
       createdAt:  d.createdAt || prev?.createdAt || nowISO(),
       createdBy:  d.createdBy || prev?.createdBy || this.user?.uid || ''
     });
+  }
+
+  /** Subtareas de una actividad, ordenadas */
+  subtasksOf(activityId) {
+    return this.data.deliverables
+      .filter(d => d.activityId === activityId)
+      .sort((a, b) => (a.order || 0) - (b.order || 0));
   }
 
   async achieveDeliverable(id, achieved = true) {
@@ -727,14 +743,50 @@ export class Store extends Emitter {
     return a?.deliverableId ? [a.deliverableId] : [];
   }
 
-  /** Actividades vinculadas a un entregable */
+  /**
+   * Actividades relacionadas con un entregable: la dueña (si es subtarea)
+   * más las que declararon contribuir a él.
+   */
   activitiesOfDeliverable(id) {
-    return this.data.activities.filter(a => Store.deliverableIdsOf(a).includes(id));
+    const d = this.deliverable(id);
+    const vistos = new Set();
+    const out = [];
+    if (d?.activityId) {
+      const dueña = this.activity(d.activityId);
+      if (dueña) { out.push(dueña); vistos.add(dueña.id); }
+    }
+    this.data.activities.forEach(a => {
+      if (!vistos.has(a.id) && Store.deliverableIdsOf(a).includes(id)) out.push(a);
+    });
+    return out;
   }
 
   /** Objetos de entregable vinculados a una actividad */
   deliverablesOfActivity(a) {
     return Store.deliverableIdsOf(a).map(id => this.deliverable(id)).filter(Boolean);
+  }
+
+  /**
+   * Entregables pendientes que ya son trabajo del día, con el motivo por
+   * el que aparecen. Un entregable entra si tiene fecha objetivo vencida
+   * o de hoy, o si alguna actividad que lo empuja está activa o vence ya.
+   * @param {string} hoy  fecha AAAA-MM-DD
+   */
+  actionableDeliverables(hoy) {
+    return this.data.deliverables
+      .filter(d => !d.achieved)
+      .map(d => {
+        const acts = this.activitiesOfDeliverable(d.id).filter(a => a.status !== 'done');
+        const enCurso = acts.filter(a => a.status === 'inprogress');
+        const vencen = acts.filter(a => a.dueDate && a.dueDate <= hoy);
+
+        if (d.targetDate && d.targetDate < hoy) return { d, motivo: 'vencido', acts };
+        if (d.targetDate === hoy)               return { d, motivo: 'hoy', acts };
+        if (enCurso.length)                     return { d, motivo: 'en-curso', acts };
+        if (vencen.length)                      return { d, motivo: 'actividad-vence', acts };
+        return null;
+      })
+      .filter(Boolean);
   }
 
   async setAssignee(id, assigneeUid) {
@@ -759,19 +811,48 @@ export class Store extends Emitter {
     }
   }
 
-  async addPomodoro(activityId, minutes) {
-    const a = this.data.activities.find(x => x.id === activityId);
-    if (a) {
-      await this._put('activities', { ...a, pomosDone: (a.pomosDone || 0) + 1, updatedAt: nowISO() });
-      await this.log(activityId, 'pomodoro', { text: `${minutes} min` });
+  /**
+   * Registra un pomodoro contra una actividad o un entregable.
+   * @param {string|{type:'activity'|'deliverable',id:string}|null} target
+   *        Se acepta un id suelto por compatibilidad con lo ya guardado.
+   */
+  async addPomodoro(target, minutes) {
+    const t = Store.normalizeTarget(target);
+
+    let activityId = '', deliverableId = '', projectId = '';
+
+    if (t?.type === 'deliverable') {
+      const d = this.deliverable(t.id);
+      if (d) {
+        deliverableId = d.id;
+        projectId = d.projectId || '';
+        await this._put('deliverables', { ...d, pomosDone: (d.pomosDone || 0) + 1, updatedAt: nowISO() });
+      }
+    } else if (t?.type === 'activity') {
+      const a = this.activity(t.id);
+      if (a) {
+        activityId = a.id;
+        projectId = a.projectId || '';
+        await this._put('activities', { ...a, pomosDone: (a.pomosDone || 0) + 1, updatedAt: nowISO() });
+        await this.log(a.id, 'pomodoro', { text: `${minutes} min` });
+      }
     }
+
     await this._put('sessions', {
       uid: this.user?.uid || 'local',
-      activityId: activityId || '',
-      projectId: a?.projectId || '',
+      activityId,
+      deliverableId,
+      projectId,
       minutes,
       endedAt: nowISO()
     });
+  }
+
+  /** Acepta id suelto (actividad) u objeto {type,id} */
+  static normalizeTarget(target) {
+    if (!target) return null;
+    if (typeof target === 'string') return { type: 'activity', id: target };
+    return target.id ? { type: target.type || 'activity', id: target.id } : null;
   }
 
   async comment(activityId, text) {
