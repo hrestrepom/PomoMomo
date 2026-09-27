@@ -1033,6 +1033,37 @@ function viewFocus() {
 }
 
 /**
+ * Fecha en que una actividad realmente termina.
+ * En una serie, `dueDate` es la ocurrencia vigente —no el final—, así que
+ * el cierre verdadero está en `recur.until`.
+ */
+function finDe(a) {
+  if (!a) return '';
+  if (a.recur) return a.recur.until || a.dueDate || a.startDate || '';
+  return a.dueDate || a.startDate || '';
+}
+
+/**
+ * Resumen legible de las fechas, sin etiquetas que engañen.
+ * Nunca dice "termina" sobre una fecha que en realidad es de inicio.
+ */
+function resumenFechas(a) {
+  if (!a) return 'sin fechas';
+  if (a.recur) {
+    const desc = describeRecur(a.recur);
+    const desde = a.dueDate || a.startDate;
+    return a.recur.until
+      ? `${desc} · hasta ${fmtDate(a.recur.until)}`
+      : desde ? `${desc} · desde ${fmtDate(desde)}` : desc;
+  }
+  if (a.startDate && a.dueDate && a.startDate !== a.dueDate)
+    return `${fmtDate(a.startDate)} → ${fmtDate(a.dueDate)}`;
+  if (a.dueDate)   return `termina ${fmtDate(a.dueDate)}`;
+  if (a.startDate) return `empieza ${fmtDate(a.startDate)}`;
+  return 'sin fechas';
+}
+
+/**
  * Primeras fechas de una serie, para mostrarlas mientras se edita.
  * Se calculan sin crear nada: son solo una previsualización.
  */
@@ -2642,7 +2673,7 @@ function activityEditor(a = null) {
             <span class="act-check ${deps.has(x.id) ? 'done' : ''}">${icon('check', 13)}</span>
             <span class="col grow" style="align-items:flex-start;min-width:0;gap:1px">
               <span class="truncate w-full" style="text-align:left;font-size:14px">${esc(x.name)}</span>
-              <span class="t-foot">${x.dueDate ? 'termina ' + fmtDate(x.dueDate) : 'sin fecha'}</span>
+              <span class="t-foot">${esc(resumenFechas(x))}</span>
             </span>
           </button>`).join('')}</div>
           <p class="t-foot mt-4">Al mover una predecesora, esta actividad se desplaza con ella.</p>`;
@@ -2651,10 +2682,11 @@ function activityEditor(a = null) {
           if (deps.has(id)) deps.delete(id);
           else {
             deps.add(id);
-            // Sin fechas propias, arranca justo después de la predecesora
-            const p = store.activity(id);
-            if (!inStart.value && p?.dueDate) {
-              inStart.value = addDays(p.dueDate, 1);
+            /* Sin fechas propias, arranca al día siguiente del cierre real
+               de la predecesora: en una serie eso es recur.until, no dueDate. */
+            const fin = finDe(store.activity(id));
+            if (!inStart.value && fin) {
+              inStart.value = addDays(fin, 1);
               const n = parseInt(inDays.value, 10) || 1;
               if (!esRepetitiva()) inDue.value = addDays(inStart.value, n - 1);
               sincronizarDesdeFechas();
@@ -2781,16 +2813,19 @@ function activityDetail(id) {
           const pre = store.predecessorsOf(a.id);
           const suc = store.successorsOf(a.id);
           if (!pre.length && !suc.length) return '';
-          const fila = (x, ic) => `<button class="list-row" data-dep-go="${x.id}">
+          const fila = (x, ic, rol) => `<button class="list-row" data-dep-go="${x.id}">
             ${icon(ic, 15)}
-            <span class="grow truncate" style="text-align:left;font-size:14px">${esc(x.name)}</span>
-            <span class="t-foot">${x.dueDate ? fmtDate(x.dueDate) : 'sin fecha'}</span>
+            <span class="col grow" style="align-items:flex-start;min-width:0;gap:1px">
+              <span class="truncate w-full" style="text-align:left;font-size:14px">${esc(x.name)}</span>
+              <span class="t-foot">${esc(resumenFechas(x))}</span>
+            </span>
+            <span class="badge badge-gray">${rol}</span>
           </button>`;
           return `<div>
             <div class="section-label">Encadenamiento</div>
             <div class="list">
-              ${pre.map(x => fila(x, 'arrowUp')).join('')}
-              ${suc.map(x => fila(x, 'arrowDown')).join('')}
+              ${pre.map(x => fila(x, 'arrowUp', 'Antes')).join('')}
+              ${suc.map(x => fila(x, 'arrowDown', 'Después')).join('')}
             </div>
             <p class="t-foot mt-4">
               ${pre.length ? `Empieza después de ${pre.length} actividad${pre.length === 1 ? '' : 'es'}. ` : ''}
