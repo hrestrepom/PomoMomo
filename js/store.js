@@ -20,6 +20,18 @@ export const nowISO = () => new Date().toISOString();
 export const dayISO = (d = new Date()) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
+/** Suma días a una fecha AAAA-MM-DD */
+export const shiftISO = (iso, n) => {
+  if (!iso) return iso;
+  const d = new Date(iso + 'T12:00:00');
+  d.setDate(d.getDate() + n);
+  return dayISO(d);
+};
+
+/** Días entre dos fechas AAAA-MM-DD */
+export const diffISO = (a, b) =>
+  Math.round((new Date(b + 'T12:00:00') - new Date(a + 'T12:00:00')) / 86400000);
+
 const clone = (o) => JSON.parse(JSON.stringify(o));
 
 /**
@@ -594,11 +606,13 @@ export class Store extends Emitter {
     const isNew = !a.id;
     const prev = isNew ? null : this.data.activities.find(x => x.id === a.id);
 
+    const { _noCascade, ...limpio } = a;
     const rec = await this._put('activities', {
-      ...a,
-      pomosDone:   a.pomosDone ?? prev?.pomosDone ?? 0,
-      createdAt:   a.createdAt || prev?.createdAt || nowISO(),
-      createdBy:   a.createdBy || prev?.createdBy || this.user?.uid || '',
+      ...limpio,
+      dependsOn:   limpio.dependsOn ?? prev?.dependsOn ?? [],
+      pomosDone:   limpio.pomosDone ?? prev?.pomosDone ?? 0,
+      createdAt:   limpio.createdAt || prev?.createdAt || nowISO(),
+      createdBy:   limpio.createdBy || prev?.createdBy || this.user?.uid || '',
       updatedAt:   nowISO()
     });
 
@@ -617,6 +631,21 @@ export class Store extends Emitter {
         await this.log(rec.id, 'due', { from: prev.dueDate || '', to: rec.dueDate || '' });
       if (prev.name !== rec.name)
         await this.log(rec.id, 'rename', { from: prev.name, to: rec.name });
+    }
+
+    /* Si la actividad se movió en el calendario, arrastra a sus sucesoras
+       para que el encadenamiento conserve la separación planeada.
+       `_noCascade` lo evita cuando el propio arrastre es quien guarda. */
+    if (prev && !isNew && !a._noCascade) {
+      const antes = prev.dueDate || prev.startDate;
+      const ahora = rec.dueDate || rec.startDate;
+      if (antes && ahora && antes !== ahora) {
+        const delta = diffISO(antes, ahora);
+        if (delta) {
+          rec._movidas = await this.cascadeShift(rec.id, delta, { motivo: `arrastre desde «${rec.name}»` });
+          rec._delta = delta;
+        }
+      }
     }
     return rec;
   }
@@ -642,7 +671,7 @@ export class Store extends Emitter {
    */
   async _spawnNextOccurrence(a) {
     const { nextOccurrence } = await import('./quickadd.js');
-    const base = a.dueDate || dayISO();
+    const base = a.dueDate || a.startDate || dayISO();
     let next = nextOccurrence(a.recur, base);
 
     // Si la fecha calculada ya pasó (tarea atrasada), avanza hasta el futuro
@@ -650,18 +679,22 @@ export class Store extends Emitter {
     while (next && next < dayISO() && guard++ < 60) {
       next = nextOccurrence(a.recur, next);
     }
+    // La serie termina en recur.until: ahí no se engendra nada más
     if (a.recur.until && next > a.recur.until) return null;
 
     const nueva = await this._put('activities', {
       name: a.name,
       projectId: a.projectId || '',
       deliverableIds: Store.deliverableIdsOf(a),
+      dependsOn: a.dependsOn || [],
       assigneeUid: a.assigneeUid || '',
       quadrant: a.quadrant,
       status: 'todo',
       points: a.points || 0,
       pomosEstimated: a.pomosEstimated || 0,
       pomosDone: 0,
+      // En una serie, cada ocurrencia es de un día: empieza y vence el mismo
+      startDate: next,
       dueDate: next,
       notes: a.notes || '',
       recur: a.recur,
@@ -672,6 +705,23 @@ export class Store extends Emitter {
     });
     await this.log(nueva.id, 'created', { text: `Repetición de «${a.name}»` });
     return nueva;
+  }
+
+  /**
+   * Fechas en que una serie caería dentro de un rango, para poder
+   * anticipar las próximas repeticiones sin tener que engendrarlas.
+   */
+  static occurrencesBetween(a, desde, hasta, nextFn, limite = 60) {
+    if (!a?.recur) return [];
+    const fin = a.recur.until && a.recur.until < hasta ? a.recur.until : hasta;
+    const out = [];
+    let f = a.dueDate || a.startDate;
+    let guard = 0;
+    while (f && f <= fin && guard++ < limite) {
+      if (f >= desde) out.push(f);
+      f = nextFn(a.recur, f);
+    }
+    return out;
   }
 
   /* ======================================================================
@@ -697,6 +747,70 @@ export class Store extends Emitter {
       createdAt:  d.createdAt || prev?.createdAt || nowISO(),
       createdBy:  d.createdBy || prev?.createdBy || this.user?.uid || ''
     });
+  }
+
+  /* ======================================================================
+     Dependencias entre actividades
+     ====================================================================== */
+
+  /** Predecesoras declaradas de una actividad */
+  predecessorsOf(id) {
+    const a = this.activity(id);
+    return (a?.dependsOn || []).map(x => this.activity(x)).filter(Boolean);
+  }
+
+  /** Actividades que declaran depender de esta */
+  successorsOf(id) {
+    return this.data.activities.filter(a => (a.dependsOn || []).includes(id));
+  }
+
+  /** Todas las sucesoras, directas e indirectas */
+  successorsClosure(id, acc = new Set()) {
+    this.successorsOf(id).forEach(s => {
+      if (acc.has(s.id)) return;      // corta ciclos si los hubiera
+      acc.add(s.id);
+      this.successorsClosure(s.id, acc);
+    });
+    return acc;
+  }
+
+  /** ¿Puede `id` depender de `candidateId` sin formar un ciclo? */
+  canDependOn(id, candidateId) {
+    if (id === candidateId) return false;
+    return !this.successorsClosure(id).has(candidateId);
+  }
+
+  /**
+   * Desplaza en cascada las sucesoras de una actividad.
+   * Se llama después de mover la predecesora, para que el resto del
+   * encadenamiento conserve la misma separación en el calendario.
+   * @returns {Array} actividades movidas
+   */
+  async cascadeShift(fromId, deltaDays, { motivo = '' } = {}) {
+    if (!deltaDays) return [];
+    const movidas = [];
+    const vistas = new Set([fromId]);
+
+    const recorrer = async (id) => {
+      for (const s of this.successorsOf(id)) {
+        if (vistas.has(s.id)) continue;
+        vistas.add(s.id);
+        const patch = { ...s, updatedAt: nowISO() };
+        if (s.startDate) patch.startDate = shiftISO(s.startDate, deltaDays);
+        if (s.dueDate)   patch.dueDate   = shiftISO(s.dueDate, deltaDays);
+        if (s.recur?.until) patch.recur = { ...s.recur, until: shiftISO(s.recur.until, deltaDays) };
+        delete patch._movidas; delete patch._delta;
+        await this._put('activities', patch);
+        await this.log(s.id, 'shift', {
+          text: `${deltaDays > 0 ? '+' : ''}${deltaDays} días${motivo ? ` · ${motivo}` : ''}`
+        });
+        movidas.push(s);
+        await recorrer(s.id);
+      }
+    };
+
+    await recorrer(fromId);
+    return movidas;
   }
 
   /** Subtareas de una actividad, ordenadas */

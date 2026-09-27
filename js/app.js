@@ -425,6 +425,22 @@ function viewToday() {
   const foco = focusTarget();
   const delsHoy = store.actionableDeliverables(today);
 
+  /* Aviso anticipado: lo que vence dentro de los próximos N días, para
+     no enterarse el mismo día del vencimiento. */
+  const avisoDias = store.prefs.remindDays ?? 3;
+  const limiteAviso = addDays(today, avisoDias);
+  const proximas = open
+    .filter(a => a.dueDate && a.dueDate > today && a.dueDate <= limiteAviso)
+    .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+
+  /* Próximas repeticiones de las series, calculadas sin crearlas */
+  const repeticiones = open
+    .filter(a => a.recur && a.dueDate)
+    .flatMap(a => Store.occurrencesBetween(a, addDays(today, 1), limiteAviso, nextOccurrence)
+      .map(f => ({ a, f })))
+    .sort((x, y) => x.f.localeCompare(y.f))
+    .slice(0, 8);
+
   const hour = new Date().getHours();
   const greet = hour < 12 ? 'Buenos días' : hour < 19 ? 'Buenas tardes' : 'Buenas noches';
   const firstName = (store.user?.displayName || '').split(' ')[0] || '';
@@ -501,6 +517,33 @@ function viewToday() {
     ${section('Para hoy', dueToday, 'today')}
     ${section('En progreso', inProgress, 'bolt')}
 
+    ${proximas.length || repeticiones.length ? `
+      <section class="mt-24">
+        <div class="row between mb-8" style="padding:0 4px">
+          <div class="row g-8">
+            ${icon('bell', 16)}
+            <span class="t-head">Se vienen</span>
+            <span class="badge badge-gray">${proximas.length + repeticiones.length}</span>
+          </div>
+          <button class="btn btn-sm btn-gray" data-remind-cfg>Avisar ${avisoDias} d antes</button>
+        </div>
+        <div class="list">
+          ${proximas.map(a => actRow(a)).join('')}
+          ${repeticiones.map(({ a, f }) => `
+            <div class="act-row">
+              <span class="act-check" style="pointer-events:none;border-style:dashed">${icon('reset', 12)}</span>
+              <button class="col grow" style="align-items:flex-start;min-width:0;gap:2px" data-open-act="${a.id}">
+                <span class="truncate w-full" style="font-size:14.5px;font-weight:500;text-align:left;color:var(--label-2)">${esc(a.name)}</span>
+                <span class="row g-6 wrap" style="font-size:11.5px;color:var(--label-3)">
+                  <span class="badge badge-blue">${fmtDue(f)}</span>
+                  <span>${esc(describeRecur(a.recur))}</span>
+                </span>
+              </button>
+              <span class="t-cap">próxima</span>
+            </div>`).join('')}
+        </div>
+      </section>` : ''}
+
     ${delsHoy.length ? `
       <section class="mt-24">
         <div class="row between mb-8" style="padding:0 4px">
@@ -514,7 +557,7 @@ function viewToday() {
         <div class="list">${delsHoy.map(x => delivTodayRow(x)).join('')}</div>
       </section>` : ''}
 
-    ${!overdue.length && !dueToday.length && !inProgress.length && !delsHoy.length ? `
+    ${!overdue.length && !dueToday.length && !inProgress.length && !delsHoy.length && !proximas.length ? `
       <div class="card mt-24">
         ${empty('check', 'Todo en orden', 'No tienes actividades vencidas ni programadas para hoy.',
           `<button class="btn btn-tinted mt-8" data-new-activity>${icon('plus', 15)} Nueva actividad</button>`)}
@@ -528,6 +571,19 @@ function viewToday() {
       bindQuickAdd(root);
       bindActivityRows(root);
       $$('[data-timer-toggle]', root).forEach(b => b.onclick = () => { toggleTimer(); renderView(); });
+      $('[data-remind-cfg]', root)?.addEventListener('click', async () => {
+        const v = await promptSheet({
+          title: 'Aviso anticipado',
+          label: '¿Cuántos días antes quieres ver lo que se vence?',
+          value: String(avisoDias), confirmText: 'Aplicar'
+        });
+        if (v === null) return;
+        const n = clampInt(v, 0, 30, -1);
+        if (n < 0) return toast('Escribe un número entre 0 y 30', 'err');
+        store.savePrefs({ remindDays: n });
+        renderView();
+        toast(n ? `Avisando ${n} días antes` : 'Aviso anticipado desactivado', 'ok');
+      });
     }
   };
 }
@@ -974,6 +1030,23 @@ function viewFocus() {
       $$('[data-open-deliv]', root).forEach(b => b.onclick = () => deliverableDetail(b.dataset.openDeliv));
     }
   };
+}
+
+/**
+ * Primeras fechas de una serie, para mostrarlas mientras se edita.
+ * Se calculan sin crear nada: son solo una previsualización.
+ */
+function ocurrenciasPrevistas(freq, inicio, hasta, max = 4) {
+  if (!freq || !inicio) return [];
+  const out = [];
+  let f = inicio;
+  let guard = 0;
+  while (f && out.length < max && guard++ < 200) {
+    if (hasta && f > hasta) break;
+    out.push(f);
+    f = nextOccurrence({ freq, interval: 1, anchorDay: parseInt(inicio.slice(8, 10), 10) }, f);
+  }
+  return out;
 }
 
 /* ---------- Fila de la cola: actividad o entregable ---------- */
@@ -2434,21 +2507,25 @@ function activityEditor(a = null) {
           <input class="input" type="number" id="a-pomos" min="0" max="40" value="${cur.pomosEstimated}"></div>
       </div>
 
+      <div class="field mt-16"><label>Se repite</label>
+        <select class="select" id="a-recur">
+          ${RECUR_OPTIONS.map(o => `<option value="${o.value}" ${(cur.recur?.freq || '') === o.value ? 'selected' : ''}>${o.label}</option>`).join('')}
+        </select></div>
+
       <div class="grid grid-3 mt-16" style="gap:12px">
-        <div class="field"><label>Inicio</label>
+        <div class="field"><label id="a-start-lbl">Inicio</label>
           <input class="input" type="date" id="a-start" value="${cur.startDate || ''}"></div>
-        <div class="field"><label>Fecha límite</label>
-          <input class="input" type="date" id="a-due" value="${cur.dueDate || ''}"></div>
-        <div class="field"><label>Duración (días)</label>
+        <div class="field"><label id="a-due-lbl">Fecha límite</label>
+          <input class="input" type="date" id="a-due"
+            value="${cur.recur?.freq ? (cur.recur.until || '') : (cur.dueDate || '')}"></div>
+        <div class="field" id="a-days-wrap"><label>Duración (días)</label>
           <input class="input" type="number" id="a-days" min="1" max="999"
             value="${durationDays(cur.startDate, cur.dueDate) || ''}" placeholder="—"></div>
       </div>
       <p class="t-foot mt-4" id="a-span-hint"></p>
 
-      <div class="field mt-16"><label>Se repite</label>
-        <select class="select" id="a-recur">
-          ${RECUR_OPTIONS.map(o => `<option value="${o.value}" ${(cur.recur?.freq || '') === o.value ? 'selected' : ''}>${o.label}</option>`).join('')}
-        </select></div>
+      <div class="field mt-16"><label>Depende de <span class="muted-2">(empieza después de…)</span></label>
+        <div id="a-deps"></div></div>
 
       <div class="field mt-16" id="a-deliv-wrap">
         <label>Entregables a los que contribuye <span class="muted-2">(opcional)</span></label>
@@ -2498,17 +2575,42 @@ function activityEditor(a = null) {
       const inStart = $('#a-start', el);
       const inDue   = $('#a-due', el);
       const inDays  = $('#a-days', el);
+      const inRecur = $('#a-recur', el);
       const hint    = $('#a-span-hint', el);
+      const daysWrap = $('#a-days-wrap', el);
+      const esRepetitiva = () => !!inRecur.value;
 
+      /* En una serie el inicio es la primera repetición y el otro extremo
+         es hasta cuándo se repite, no una duración de trabajo. */
       const pintarHint = () => {
+        if (esRepetitiva()) {
+          $('#a-start-lbl', el).textContent = 'Primera repetición';
+          $('#a-due-lbl', el).textContent = 'Repetir hasta';
+          daysWrap.classList.add('hidden');
+          const desc = describeRecur({ freq: inRecur.value, interval: 1 });
+          if (inStart.value) {
+            const fechas = ocurrenciasPrevistas(inRecur.value, inStart.value, inDue.value, 4);
+            hint.textContent = `Se repite ${desc} desde el ${fmtDate(inStart.value)}`
+              + (inDue.value ? ` hasta el ${fmtDate(inDue.value)}` : ' sin fecha de fin')
+              + (fechas.length ? `. Próximas: ${fechas.map(f => fmtDate(f)).join(' · ')}` : '.');
+          } else {
+            hint.textContent = `Indica la primera repetición: ese día aparecerá en Hoy.`;
+          }
+          return;
+        }
+        $('#a-start-lbl', el).textContent = 'Inicio';
+        $('#a-due-lbl', el).textContent = 'Fecha límite';
+        daysWrap.classList.remove('hidden');
         const n = durationDays(inStart.value, inDue.value);
         if (n) hint.textContent = `${fmtDays(n)} de trabajo, del ${fmtDate(inStart.value)} al ${fmtDate(inDue.value)}.`;
         else if (inDue.value && !inStart.value) hint.textContent = 'Solo hay fecha límite. Agrega el inicio para saber cuántos días tomará.';
         else if (inStart.value && !inDue.value) hint.textContent = 'Indica la duración o la fecha límite.';
         else hint.textContent = '';
       };
+      inRecur.addEventListener('change', pintarHint);
 
       const sincronizarDesdeFechas = () => {
+        if (esRepetitiva()) { pintarHint(); return; }   // aquí no hay duración que calcular
         if (inStart.value && inDue.value) {
           if (inDue.value < inStart.value) { inDue.value = inStart.value; }
           inDays.value = durationDays(inStart.value, inDue.value) || '';
@@ -2517,12 +2619,53 @@ function activityEditor(a = null) {
       };
 
       inStart.addEventListener('change', () => {
+        if (esRepetitiva()) { pintarHint(); return; }
         // Con duración ya fijada, mover el inicio arrastra el fin
         const n = parseInt(inDays.value, 10);
         if (inStart.value && n > 0) inDue.value = addDays(inStart.value, n - 1);
         sincronizarDesdeFechas();
       });
       inDue.addEventListener('change', sincronizarDesdeFechas);
+      /* Predecesoras: solo del mismo proyecto y sin formar ciclos */
+      const depsBox = $('#a-deps', el);
+      let deps = new Set(cur.dependsOn || []);
+      const pintarDeps = () => {
+        const candidatas = store.activitiesOf(projSel.value)
+          .filter(x => x.id !== cur.id && (!cur.id || store.canDependOn(cur.id, x.id)));
+        deps = new Set([...deps].filter(id => candidatas.some(c => c.id === id)));
+        if (!candidatas.length) {
+          depsBox.innerHTML = `<p class="t-foot">No hay otras actividades en este proyecto.</p>`;
+          return;
+        }
+        depsBox.innerHTML = `<div class="list" style="max-height:190px;overflow-y:auto">${candidatas.map(x => `
+          <button type="button" class="list-row" data-dep="${x.id}">
+            <span class="act-check ${deps.has(x.id) ? 'done' : ''}">${icon('check', 13)}</span>
+            <span class="col grow" style="align-items:flex-start;min-width:0;gap:1px">
+              <span class="truncate w-full" style="text-align:left;font-size:14px">${esc(x.name)}</span>
+              <span class="t-foot">${x.dueDate ? 'termina ' + fmtDate(x.dueDate) : 'sin fecha'}</span>
+            </span>
+          </button>`).join('')}</div>
+          <p class="t-foot mt-4">Al mover una predecesora, esta actividad se desplaza con ella.</p>`;
+        $$('[data-dep]', depsBox).forEach(b => b.onclick = () => {
+          const id = b.dataset.dep;
+          if (deps.has(id)) deps.delete(id);
+          else {
+            deps.add(id);
+            // Sin fechas propias, arranca justo después de la predecesora
+            const p = store.activity(id);
+            if (!inStart.value && p?.dueDate) {
+              inStart.value = addDays(p.dueDate, 1);
+              const n = parseInt(inDays.value, 10) || 1;
+              if (!esRepetitiva()) inDue.value = addDays(inStart.value, n - 1);
+              sincronizarDesdeFechas();
+            }
+          }
+          $('.act-check', b).classList.toggle('done', deps.has(id));
+        });
+      };
+      pintarDeps();
+      projSel.addEventListener('change', pintarDeps);
+
       inDays.addEventListener('input', () => {
         const n = clampInt(inDays.value, 1, 999, 0);
         if (!n) { pintarHint(); return; }
@@ -2538,34 +2681,55 @@ function activityEditor(a = null) {
         const name = $('#a-name', el).value.trim();
         if (!name) return toast('Escribe el nombre de la actividad', 'err');
         const status = $('#a-status', el).value;
-        const freq = $('#a-recur', el).value;
-        const due = inDue.value;
-        const recur = freq
-          ? withAnchor({ ...(cur.recur || {}), freq, interval: cur.recur?.interval || 1 }, due)
-          : null;
+        const freq = inRecur.value;
+
+        /* En una serie el campo de fin es "repetir hasta" y la ocurrencia
+           vigente vence el mismo día en que empieza. */
+        let inicio = inStart.value;
+        let due, recur;
+        if (freq) {
+          if (!inicio) inicio = todayISO();
+          due = inicio;
+          recur = withAnchor(
+            { ...(cur.recur || {}), freq, interval: cur.recur?.interval || 1, until: inDue.value || '' },
+            inicio
+          );
+        } else {
+          due = inDue.value;
+          recur = null;
+        }
 
         const btn = ev.currentTarget;
         btn.disabled = true;
-        const ok = await guardar(() => store.saveActivity({
+        let guardada;
+        const ok = await guardar(async () => { guardada = await store.saveActivity({
           ...(a?.id ? { id: a.id, createdAt: a.createdAt, completedAt: a.completedAt } : {}),
           name,
           projectId: projSel.value,
           deliverableIds: [...seleccion],
+          dependsOn: [...deps],
           assigneeUid: $('#a-assignee', el).value,
           quadrant: quad,
           status,
           points: +$('#a-points', el).value,
           pomosEstimated: clampInt($('#a-pomos', el).value, 0, 40, 0),
-          startDate: inStart.value,
+          startDate: inicio,
           dueDate: due,
           notes: $('#a-notes', el).value.trim(),
           recur,
           completedAt: status === 'done' ? (a?.completedAt || nowISO()) : null
-        }));
+        }); });
         btn.disabled = false;
         if (!ok) return;                       // la hoja sigue abierta con los datos
         closeSheet();
-        toast(isNew ? 'Actividad creada' : 'Cambios guardados', 'ok');
+
+        const n = guardada?._movidas?.length || 0;
+        if (n) {
+          const d = guardada._delta;
+          toast(`Guardado · ${n} actividad${n === 1 ? '' : 'es'} dependiente${n === 1 ? '' : 's'} se desplazó ${d > 0 ? '+' : ''}${d} días`, 'ok', 4200);
+        } else {
+          toast(isNew ? 'Actividad creada' : 'Cambios guardados', 'ok');
+        }
       };
     }
   });
@@ -2598,13 +2762,42 @@ function activityDetail(id) {
             return n ? `<span class="badge badge-purple">${icon('clock', 11)} ${fmtDays(n)}</span>` : ''; })()}
         </div>
 
-        ${a.startDate && a.dueDate ? `
+        ${a.recur ? `
+          <div class="list">
+            <div class="list-row">
+              <span class="grow t-sub">Se repite</span>
+              <span style="font-size:13.5px">${esc(describeRecur(a.recur))}${a.recur.until ? ` · hasta ${fmtDate(a.recur.until)}` : ''}</span>
+            </div>
+          </div>`
+        : a.startDate && a.dueDate ? `
           <div class="list">
             <div class="list-row">
               <span class="grow t-sub">Ventana de trabajo</span>
               <span style="font-size:13.5px">${fmtDate(a.startDate)} → ${fmtDate(a.dueDate)}</span>
             </div>
           </div>` : ''}
+
+        ${(() => {
+          const pre = store.predecessorsOf(a.id);
+          const suc = store.successorsOf(a.id);
+          if (!pre.length && !suc.length) return '';
+          const fila = (x, ic) => `<button class="list-row" data-dep-go="${x.id}">
+            ${icon(ic, 15)}
+            <span class="grow truncate" style="text-align:left;font-size:14px">${esc(x.name)}</span>
+            <span class="t-foot">${x.dueDate ? fmtDate(x.dueDate) : 'sin fecha'}</span>
+          </button>`;
+          return `<div>
+            <div class="section-label">Encadenamiento</div>
+            <div class="list">
+              ${pre.map(x => fila(x, 'arrowUp')).join('')}
+              ${suc.map(x => fila(x, 'arrowDown')).join('')}
+            </div>
+            <p class="t-foot mt-4">
+              ${pre.length ? `Empieza después de ${pre.length} actividad${pre.length === 1 ? '' : 'es'}. ` : ''}
+              ${suc.length ? `Al mover esta, ${suc.length} se desplaza${suc.length === 1 ? '' : 'n'} con ella.` : ''}
+            </p>
+          </div>`;
+        })()}
 
         <div class="list">
           <div class="list-row">
@@ -2733,6 +2926,8 @@ function activityDetail(id) {
       setFocusTarget('deliverable', b.dataset.subFocus);
       closeSheet(); go('focus');
     });
+
+    $$('[data-dep-go]', el).forEach(b => b.onclick = () => { closeSheet(); activityDetail(b.dataset.depGo); });
   };
 
   /* El pie NO se regenera: se vincula una sola vez para no duplicar listeners. */
