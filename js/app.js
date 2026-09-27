@@ -1969,6 +1969,7 @@ function sprintsSection(pr) {
               ${vigente ? `<span class="badge badge-green">En curso · ${dias} d</span>`
                 : s.end < hoy ? `<span class="badge badge-gray">Cerrado</span>`
                 : `<span class="badge badge-blue">Próximo</span>`}
+              ${s.autoFit ? `<span class="badge badge-purple" title="Las fechas siguen a sus actividades">${icon('reset', 10)} auto</span>` : ''}
             </span>
             <span class="t-foot">${fmtDate(s.start)} → ${fmtDate(s.end)} · ${acts.length} actividades · ${st.donePoints}/${st.points} pts</span>
             <span class="progress w-full" style="max-width:240px"><i style="width:${st.pctPoints}%;background:${vigente ? 'var(--green)' : 'var(--gray)'}"></i></span>
@@ -2535,7 +2536,11 @@ function activityEditor(a = null) {
             ${[1, 2, 3, 5, 8, 13, 21].map(n => `<option value="${n}" ${+cur.points === n ? 'selected' : ''}>${n}</option>`).join('')}
           </select></div>
         <div class="field"><label>Pomodoros est.</label>
-          <input class="input" type="number" id="a-pomos" min="0" max="40" value="${cur.pomosEstimated}"></div>
+          <input class="input" type="number" id="a-pomos" min="0" max="400" value="${cur.pomosEstimated}"></div>
+      </div>
+      <div class="row between g-8 mt-4" id="a-pomo-hint-row">
+        <span class="t-foot grow" id="a-pomo-hint"></span>
+        <button type="button" class="btn btn-sm btn-tinted hidden" id="a-pomo-fit">Ajustar</button>
       </div>
 
       <div class="field mt-16"><label>Se repite</label>
@@ -2698,6 +2703,48 @@ function activityEditor(a = null) {
       pintarDeps();
       projSel.addEventListener('change', pintarDeps);
 
+      /* La estimación no puede quedar por debajo de lo que exige la
+         estructura: cada repetición y cada subtarea piden su pomodoro,
+         y lo ya invertido tampoco se puede estimar hacia atrás. */
+      const inPomos = $('#a-pomos', el);
+      const pomoHint = $('#a-pomo-hint', el);
+      const pomoFit = $('#a-pomo-fit', el);
+
+      const pisoActual = () => {
+        const subs = cur.id ? store.subtasksOf(cur.id) : [];
+        const gastados = cur.id ? store.pomosTotal(store.activity(cur.id)) : 0;
+        const freq = inRecur.value;
+        const reps = freq && inStart.value && inDue.value
+          ? ocurrenciasPrevistas(freq, inStart.value, inDue.value, 400).length
+          : 0;
+        const partes = [
+          { n: reps,        txt: `${reps} repeticiones` },
+          { n: subs.length, txt: `${subs.length} subtarea${subs.length === 1 ? '' : 's'}` },
+          { n: gastados,    txt: `${gastados} ya invertido${gastados === 1 ? '' : 's'}` }
+        ].filter(p => p.n > 0).sort((a2, b2) => b2.n - a2.n);
+        return { minimo: partes[0]?.n || 0, detalle: partes.map(p => p.txt).join(' · ') };
+      };
+
+      const pintarPomos = () => {
+        const { minimo, detalle } = pisoActual();
+        const actual = parseInt(inPomos.value, 10) || 0;
+        if (!minimo) { pomoHint.textContent = ''; pomoFit.classList.add('hidden'); return; }
+        if (actual < minimo) {
+          pomoHint.innerHTML = `<span style="color:var(--orange)">Mínimo ${minimo} por su estructura</span> · ${esc(detalle)}`;
+          pomoFit.textContent = `Subir a ${minimo}`;
+          pomoFit.classList.remove('hidden');
+        } else {
+          pomoHint.textContent = `Cubre su estructura: ${detalle}`;
+          pomoFit.classList.add('hidden');
+        }
+      };
+      pomoFit.onclick = () => { inPomos.value = pisoActual().minimo; pintarPomos(); };
+      inPomos.addEventListener('input', pintarPomos);
+      inRecur.addEventListener('change', pintarPomos);
+      inStart.addEventListener('change', pintarPomos);
+      inDue.addEventListener('change', pintarPomos);
+      pintarPomos();
+
       inDays.addEventListener('input', () => {
         const n = clampInt(inDays.value, 1, 999, 0);
         if (!n) { pintarHint(); return; }
@@ -2756,12 +2803,13 @@ function activityEditor(a = null) {
         closeSheet();
 
         const n = guardada?._movidas?.length || 0;
-        if (n) {
-          const d = guardada._delta;
-          toast(`Guardado · ${n} actividad${n === 1 ? '' : 'es'} dependiente${n === 1 ? '' : 's'} se desplazó ${d > 0 ? '+' : ''}${d} días`, 'ok', 4200);
-        } else {
-          toast(isNew ? 'Actividad creada' : 'Cambios guardados', 'ok');
-        }
+        const sp = guardada?._sprints || [];
+        const partes = [];
+        if (n) { const d = guardada._delta;
+          partes.push(`${n} dependiente${n === 1 ? '' : 's'} ${d > 0 ? '+' : ''}${d} días`); }
+        if (sp.length) partes.push(`${sp.length} sprint${sp.length === 1 ? '' : 's'} reencuadrado${sp.length === 1 ? '' : 's'}`);
+        toast(partes.length ? `Guardado · ${partes.join(' · ')}`
+                            : (isNew ? 'Actividad creada' : 'Cambios guardados'), 'ok', partes.length ? 4200 : 2600);
       };
     }
   });
@@ -2845,13 +2893,25 @@ function activityDetail(id) {
             <span style="font-size:13.5px">${STATUSES[a.status].name}</span>
             <button class="btn btn-sm btn-tinted" data-d="status">Mover</button>
           </div>
-          ${a.pomosEstimated ? `<div class="list-row">
-            <span class="grow t-sub">Pomodoros</span>
-            <span class="row g-8" style="width:130px">
-              <span class="tnum t-foot">${a.pomosDone || 0}/${a.pomosEstimated}</span>
-              <span class="progress grow"><i style="width:${pct * 100}%;background:var(--red)"></i></span>
-            </span>
-          </div>` : ''}
+          ${(() => {
+            const total = store.pomosTotal(a);
+            const deSubs = total - (a.pomosDone || 0);
+            const piso = store.pomoFloor(a);
+            const est = a.pomosEstimated || 0;
+            if (!est && !total && !piso.minimo) return '';
+            const p = est ? Math.min(1, total / est) : 0;
+            return `<div class="list-row">
+              <span class="col grow" style="align-items:flex-start;gap:2px">
+                <span class="t-sub">Pomodoros</span>
+                ${deSubs ? `<span class="t-cap">${a.pomosDone || 0} propio${(a.pomosDone || 0) === 1 ? '' : 's'} + ${deSubs} de subtareas</span>` : ''}
+                ${est && piso.minimo > est ? `<span class="t-cap" style="color:var(--orange)">Mínimo ${piso.minimo}: ${esc(piso.razon)}</span>` : ''}
+              </span>
+              <span class="row g-8" style="width:130px">
+                <span class="tnum t-foot">${total}${est ? '/' + est : ''}</span>
+                ${est ? `<span class="progress grow"><i style="width:${p * 100}%;background:var(--red)"></i></span>` : ''}
+              </span>
+            </div>`;
+          })()}
         </div>
 
         ${(() => {
@@ -3478,7 +3538,7 @@ function sprintSheet(sprint, preset = {}) {
   const cur = {
     name: `Sprint ${store.data.sprints.length + 1}`,
     start: todayISO(), end: addDays(todayISO(), 13),
-    projectId: '', activityIds: [],
+    projectId: '', activityIds: [], autoFit: false,
     ...preset, ...sprint
   };
 
@@ -3491,6 +3551,11 @@ function sprintSheet(sprint, preset = {}) {
     body: `
       <div class="field"><label>Nombre</label>
         <input class="input" id="sp-name" value="${esc(cur.name)}" placeholder="Ej. Semana del 10"></div>
+
+      <div class="list mt-16">
+        ${toggleRow('sp-auto', 'Ajustar fechas a sus actividades', cur.autoFit)}
+      </div>
+      <p class="t-foot mt-4" id="sp-auto-hint"></p>
 
       <div class="grid grid-2 mt-16" style="gap:12px">
         <div class="field"><label>Inicio</label><input class="input" type="date" id="sp-start" value="${cur.start}"></div>
@@ -3566,15 +3631,38 @@ function sprintSheet(sprint, preset = {}) {
           hint.textContent = seleccion.size
             ? `${seleccion.size} seleccionada(s). El burndown contará solo estas.`
             : 'Ninguna marcada: el burndown incluirá todas las del alcance.';
+          pintarAuto();
         });
       };
 
+      /* Con ajuste automático, las fechas las mandan las actividades */
+      const swAuto = $('#sp-auto', el);
+      const autoHint = $('#sp-auto-hint', el);
+      const inIni = $('#sp-start', el), inFin = $('#sp-end', el);
+
+      const pintarAuto = () => {
+        const auto = swAuto.classList.contains('on');
+        inIni.disabled = inFin.disabled = auto;
+        inIni.style.opacity = inFin.style.opacity = auto ? '.55' : '';
+        if (!auto) { autoHint.textContent = 'Las fechas se fijan a mano.'; return; }
+        const w = store.sprintWindow({ projectId: projSel.value, activityIds: [...seleccion] });
+        if (w) {
+          inIni.value = w.start; inFin.value = w.end;
+          autoHint.textContent = `Encuadrado a sus actividades: ${fmtDate(w.start)} → ${fmtDate(w.end)}. Se reajusta solo cuando alguna se mueva.`;
+        } else {
+          autoHint.textContent = 'Ninguna actividad del alcance tiene fechas todavía.';
+        }
+      };
+      swAuto.parentElement.addEventListener('click', () => setTimeout(pintarAuto, 0));
+
       pintar();
+      pintarAuto();
       projSel.addEventListener('change', () => {
         // Al cambiar de alcance se descartan las que ya no aplican
         const validas = new Set(candidatas().map(a => a.id));
         seleccion = new Set([...seleccion].filter(id => validas.has(id)));
         pintar();
+        pintarAuto();
       });
       $('#sp-all', el).onclick = () => { seleccion = new Set(candidatas().map(a => a.id)); pintar(); };
       $('#sp-none', el).onclick = () => { seleccion = new Set(); pintar(); };
@@ -3598,6 +3686,7 @@ function sprintSheet(sprint, preset = {}) {
             ...(sprint?.id ? { id: sprint.id, createdAt: sprint.createdAt } : {}),
             name: $('#sp-name', el).value.trim() || 'Sprint',
             start, end,
+            autoFit: swAuto.classList.contains('on'),
             projectId: projSel.value,
             activityIds: [...seleccion]
           });

@@ -6,6 +6,7 @@
    ========================================================================== */
 
 import { FIREBASE_CONFIG, WORKSPACE_ID, FIREBASE_SDK, IS_CONFIGURED, DEFAULT_TIMER } from './config.js';
+import { nextOccurrence } from './quickadd.js';
 
 const LS_KEY   = 'pomomomo.v2';
 const LS_PREFS = 'pomomomo.prefs';
@@ -647,6 +648,9 @@ export class Store extends Emitter {
         }
       }
     }
+
+    // Los sprints automáticos reencuadran su propio contenido
+    rec._sprints = await this.refitSprints();
     return rec;
   }
 
@@ -670,7 +674,6 @@ export class Store extends Emitter {
    * @returns {object|null} la nueva actividad, para poder avisar en la interfaz
    */
   async _spawnNextOccurrence(a) {
-    const { nextOccurrence } = await import('./quickadd.js');
     const base = a.dueDate || a.startDate || dayISO();
     let next = nextOccurrence(a.recur, base);
 
@@ -811,6 +814,60 @@ export class Store extends Emitter {
 
     await recorrer(fromId);
     return movidas;
+  }
+
+  /* ======================================================================
+     Esfuerzo en pomodoros
+     ====================================================================== */
+
+  /**
+   * Cuántas veces se repetirá una serie en total.
+   * Devuelve 0 si no tiene fin definido: entonces no se puede acotar.
+   */
+  occurrenceCount(a) {
+    if (!a?.recur) return 0;
+    const desde = a.startDate || a.dueDate;
+    if (!desde || !a.recur.until) return 0;
+    return Store.occurrencesBetween(
+      { ...a, dueDate: desde }, desde, a.recur.until, nextOccurrence, 400
+    ).length;
+  }
+
+  /**
+   * Pomodoros hechos de verdad: los propios más los de sus subtareas.
+   * El trabajo invertido en una subtarea es trabajo de la actividad.
+   */
+  pomosTotal(a) {
+    if (!a) return 0;
+    return (a.pomosDone || 0) +
+      this.subtasksOf(a.id).reduce((n, s) => n + (s.pomosDone || 0), 0);
+  }
+
+  /**
+   * Mínimo de pomodoros que implica la estructura de la actividad.
+   * Cada repetición pide al menos uno, cada subtarea pide al menos uno,
+   * y lo ya invertido no se puede estimar por debajo.
+   * @returns {{minimo:number, repeticiones:number, subtareas:number, gastados:number, razon:string}}
+   */
+  pomoFloor(a) {
+    if (!a) return { minimo: 0, repeticiones: 0, subtareas: 0, gastados: 0, razon: '' };
+    const subs = this.subtasksOf(a.id);
+    const repeticiones = this.occurrenceCount(a);
+    const subtareas = subs.length;
+    const gastados = this.pomosTotal(a);
+
+    const candidatos = [
+      { n: repeticiones, razon: `${repeticiones} repeticiones de la serie` },
+      { n: subtareas,    razon: `${subtareas} subtarea${subtareas === 1 ? '' : 's'}` },
+      { n: gastados,     razon: `${gastados} ya invertido${gastados === 1 ? '' : 's'}` }
+    ].filter(c => c.n > 0).sort((x, y) => y.n - x.n);
+
+    const top = candidatos[0];
+    return {
+      minimo: top?.n || 0,
+      repeticiones, subtareas, gastados,
+      razon: top?.razon || ''
+    };
   }
 
   /** Subtareas de una actividad, ordenadas */
@@ -996,9 +1053,51 @@ export class Store extends Emitter {
      Sprints
      ====================================================================== */
   async saveSprint(s) {
-    return this._put('sprints', { ...s, createdAt: s.createdAt || nowISO() });
+    const prev = s.id ? this.data.sprints.find(x => x.id === s.id) : null;
+    const rec = { ...s, autoFit: s.autoFit ?? prev?.autoFit ?? false, createdAt: s.createdAt || prev?.createdAt || nowISO() };
+    if (rec.autoFit) Object.assign(rec, this.sprintWindow(rec) || {});
+    return this._put('sprints', rec);
   }
   async deleteSprint(id) { return this._del('sprints', id); }
+
+  /** Actividades que definen el alcance de un sprint */
+  sprintScopeActivities(s) {
+    if (!s) return [];
+    if (s.activityIds?.length) return s.activityIds.map(id => this.activity(id)).filter(Boolean);
+    if (s.projectId) return this.activitiesOf(s.projectId);
+    return [];
+  }
+
+  /**
+   * Ventana que abarcan las actividades de un sprint.
+   * @returns {{start,end}|null} null si ninguna tiene fechas
+   */
+  sprintWindow(s) {
+    const acts = this.sprintScopeActivities(s);
+    const inicios = acts.map(a => a.startDate || a.dueDate).filter(Boolean).sort();
+    const fines = acts.map(a => (a.recur ? (a.recur.until || a.dueDate) : (a.dueDate || a.startDate)))
+      .filter(Boolean).sort();
+    if (!inicios.length || !fines.length) return null;
+    return { start: inicios[0], end: fines[fines.length - 1] };
+  }
+
+  /**
+   * Reajusta los sprints marcados como automáticos.
+   * Se llama después de mover actividades para que el sprint siga
+   * encuadrando su propio contenido sin tocarlo a mano.
+   * @returns {Array} sprints que cambiaron
+   */
+  async refitSprints() {
+    const cambiados = [];
+    for (const s of this.data.sprints.filter(x => x.autoFit)) {
+      const w = this.sprintWindow(s);
+      if (!w) continue;
+      if (w.start === s.start && w.end === s.end) continue;
+      await this._put('sprints', { ...s, ...w });
+      cambiados.push({ sprint: s, antes: { start: s.start, end: s.end }, ahora: w });
+    }
+    return cambiados;
+  }
 
   /* ======================================================================
      Equipo
