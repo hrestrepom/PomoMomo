@@ -1570,7 +1570,7 @@ function timerSettingsSheet() {
       <button class="btn btn-gray btn-block mt-16" id="s-notif">${icon('bell', 15)} Activar notificaciones del sistema</button>`,
     footer: `<button class="btn btn-gray" data-x="c">Cancelar</button><button class="btn btn-primary" data-x="s">Guardar</button>`,
     onMount(el) {
-      $$('.switch', el).forEach(sw => sw.parentElement.onclick = () => sw.classList.toggle('on'));
+      bindToggles(el);
       $('#s-notif', el).onclick = async () => {
         if (!('Notification' in window)) return toast('Este navegador no soporta notificaciones', 'err');
         const r = await Notification.requestPermission();
@@ -1596,8 +1596,28 @@ function timerSettingsSheet() {
   });
 }
 
-const toggleRow = (id, label, on) =>
-  `<div class="list-row"><span class="grow">${esc(label)}</span><i class="switch ${on ? 'on' : ''}" id="${id}"></i></div>`;
+const toggleRow = (id, label, on, sub = '') =>
+  `<div class="list-row" data-toggle-row style="cursor:pointer">
+     <span class="col grow" style="align-items:flex-start;gap:1px">
+       <span>${esc(label)}</span>
+       ${sub ? `<span class="t-foot">${esc(sub)}</span>` : ''}
+     </span>
+     <i class="switch ${on ? 'on' : ''}" id="${id}"></i>
+   </div>`;
+
+/**
+ * Activa los interruptores de una hoja. Centralizado a propósito:
+ * cada hoja que lo reimplementaba se arriesgaba a olvidar el toggle
+ * y dejar el control inerte.
+ */
+function bindToggles(root, onChange) {
+  $$('[data-toggle-row]', root).forEach(row => row.onclick = () => {
+    const sw = $('.switch', row);
+    if (!sw) return;
+    sw.classList.toggle('on');
+    onChange?.(sw.id, sw.classList.contains('on'));
+  });
+}
 
 const clampInt = (v, min, max, def) => {
   const n = parseInt(v, 10);
@@ -3553,7 +3573,8 @@ function sprintSheet(sprint, preset = {}) {
         <input class="input" id="sp-name" value="${esc(cur.name)}" placeholder="Ej. Semana del 10"></div>
 
       <div class="list mt-16">
-        ${toggleRow('sp-auto', 'Ajustar fechas a sus actividades', cur.autoFit)}
+        ${toggleRow('sp-auto', 'Ajustar fechas a sus actividades', cur.autoFit,
+          'El sprint encuadra su alcance y se reajusta cuando alguna se mueve')}
       </div>
       <p class="t-foot mt-4" id="sp-auto-hint"></p>
 
@@ -3653,7 +3674,7 @@ function sprintSheet(sprint, preset = {}) {
           autoHint.textContent = 'Ninguna actividad del alcance tiene fechas todavía.';
         }
       };
-      swAuto.parentElement.addEventListener('click', () => setTimeout(pintarAuto, 0));
+      bindToggles(el, () => pintarAuto());
 
       pintar();
       pintarAuto();
