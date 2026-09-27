@@ -10,7 +10,7 @@ import { parse as parseQuick, describeRecur, nextOccurrence, withAnchor, RECUR_O
 import * as Chart from './charts.js';
 import {
   QUADRANTS, STATUSES, STATUS_ORDER, PALETTE, TILE_ICONS,
-  IS_CONFIGURED, DEFAULT_TIMER
+  IS_CONFIGURED, DEFAULT_TIMER, APP_VERSION, APP_BUILD
 } from './config.js';
 import {
   icon, esc, $, $$, toast, openSheet, closeSheet, confirmSheet, promptSheet, openMenu,
@@ -4146,10 +4146,20 @@ function viewSettings() {
     <div class="card">
       <div class="card-head"><span class="card-title">Aplicación</span></div>
       <div class="list">
-        <div class="list-row"><span class="grow t-sub">Versión</span><span class="t-foot">2.0</span></div>
+        <div class="list-row">
+          <span class="grow t-sub">Versión</span>
+          <span class="t-foot tnum">${APP_VERSION} · ${APP_BUILD}</span>
+        </div>
         <div class="list-row"><span class="grow t-sub">Modo</span><span class="t-foot">${store.mode === 'cloud' ? 'Nube' : 'Local'}</span></div>
         <div class="list-row"><span class="grow t-sub">Instalable</span><span class="t-foot">${window.matchMedia('(display-mode: standalone)').matches ? 'Instalada' : 'Sí (Compartir → Añadir a inicio)'}</span></div>
       </div>
+
+      <button class="btn btn-primary btn-block mt-12" id="btn-update">
+        ${icon('reset', 15)} Forzar actualización
+      </button>
+      <p class="t-foot mt-4">Borra la caché y recarga. Úsalo si un arreglo reciente no aparece:
+      en la app instalada del iPhone no hay recarga forzada del navegador.</p>
+
       <p class="t-foot mt-12">En iPhone/iPad: abre en Safari, toca <b>Compartir</b> y luego <b>Añadir a pantalla de inicio</b> para usarla como app.</p>
     </div>`;
 
@@ -4171,6 +4181,17 @@ function viewSettings() {
           await store.seedDemo(); toast('Datos de ejemplo cargados', 'ok'); renderView();
         }
       };
+      $('#btn-update', root).onclick = async (e) => {
+        const b = e.currentTarget;
+        b.disabled = true; b.innerHTML = 'Actualizando…';
+        try {
+          for (const r of await navigator.serviceWorker.getRegistrations()) await r.unregister();
+          for (const k of await caches.keys()) await caches.delete(k);
+        } catch { /* si no hay caché, igual se recarga */ }
+        // El parámetro rompe la caché HTTP de los módulos
+        location.replace(location.pathname + '?v=' + Date.now() + location.hash);
+      };
+
       $('#btn-clear', root).onclick = async () => {
         if (await confirmSheet({ title: 'Borrar todo', message: 'Se eliminarán portafolios, proyectos, actividades e historial. No se puede deshacer.', confirmText: 'Borrar todo', danger: true })) {
           await store.clearAll(); toast('Datos eliminados', 'ok'); renderView();
@@ -4303,19 +4324,37 @@ function bindSignIn() {
    Service worker
    ========================================================================== */
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+  /* Cuando el nuevo service worker toma el control, se recarga una sola vez.
+     Sin esto la pestaña seguía ejecutando el código viejo hasta que el
+     usuario adivinara que debía forzar la recarga. */
+  let recargando = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (recargando) return;
+    recargando = true;
+    location.reload();
+  });
+
   window.addEventListener('load', async () => {
     try {
       // updateViaCache:'none' evita que el propio sw.js quede en caché HTTP,
       // así una nueva versión publicada siempre se detecta.
       const reg = await navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' });
+
       reg.addEventListener('updatefound', () => {
         const sw = reg.installing;
         sw?.addEventListener('statechange', () => {
           if (sw.state === 'installed' && navigator.serviceWorker.controller) {
-            sw.postMessage('skipWaiting');
-            toast('Nueva versión disponible — recarga para aplicarla', 'info', 6000);
+            toast('Actualizando a la versión nueva…', 'info', 3000);
+            sw.postMessage('skipWaiting');   // dispara controllerchange → recarga
           }
         });
+      });
+
+      // Busca versión nueva al abrir y cada vez que se vuelve a la app,
+      // que en el iPhone instalado es el único momento fiable.
+      reg.update().catch(() => {});
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) reg.update().catch(() => {});
       });
     } catch { /* el service worker es opcional */ }
   });

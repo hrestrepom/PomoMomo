@@ -5,7 +5,9 @@
    Los recursos de Firebase no se cachean.
    ========================================================================== */
 
-const VERSION = 'pomomomo-v2.0.0';
+/* Debe cambiar en cada publicación: es lo que invalida la caché anterior
+   y dispara el relevo del service worker. */
+const VERSION = 'pomomomo-v2.9.0';
 const SHELL = [
   './',
   './index.html',
@@ -54,7 +56,7 @@ self.addEventListener('fetch', (e) => {
   // Navegación: red primero, caché como respaldo
   if (request.mode === 'navigate') {
     e.respondWith(
-      fetch(request)
+      fetch(request, { cache: 'no-cache' })
         .then(res => {
           const copy = res.clone();
           caches.open(VERSION).then(c => c.put('./index.html', copy));
@@ -65,10 +67,13 @@ self.addEventListener('fetch', (e) => {
     return;
   }
 
-  // Mismo origen: red primero, caché como respaldo
+  // Mismo origen: red primero, caché como respaldo.
+  // cache:'no-cache' obliga a revalidar contra el servidor. Sin esto la
+  // caché HTTP del navegador servía módulos viejos indefinidamente y los
+  // arreglos no llegaban aunque el service worker ya estuviera al día.
   if (url.origin === location.origin) {
     e.respondWith(
-      fetch(request)
+      fetch(request, { cache: 'no-cache' })
         .then(res => {
           if (res.ok) {
             const copy = res.clone();
