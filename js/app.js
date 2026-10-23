@@ -410,7 +410,7 @@ const btnNew = (label = 'Nueva actividad') =>
 function viewToday() {
   const acts = store.data.activities;
   const today = todayISO();
-  const open = acts.filter(a => a.status !== 'done');
+  const open = store.liveActivities();   // excluye las de proyectos cerrados
 
   const overdue = open.filter(a => a.dueDate && a.dueDate < today)
     .sort((a, b) => (a.dueDate || '').localeCompare(b.dueDate || ''));
@@ -850,8 +850,7 @@ function viewFocus() {
 
   /* La cola mezcla actividades y entregables: los entregables son los
      pasos concretos con los que se cierra una actividad. */
-  const acts = store.data.activities
-    .filter(a => a.status !== 'done')
+  const acts = store.liveActivities()
     .sort((a, b) => {
       const pa = ['Q1', 'Q3', 'Q2', 'Q4'].indexOf(a.quadrant);
       const pb = ['Q1', 'Q3', 'Q2', 'Q4'].indexOf(b.quadrant);
@@ -1712,13 +1711,30 @@ function viewPortfolioDetail({ id }) {
       <div class="stat"><span class="stat-label">Puntos</span><span class="stat-value">${st.donePoints}<span style="font-size:15px;color:var(--label-3)">/${st.points}</span></span></div>
     </div>
 
-    <div class="row between mb-8" style="padding:0 4px">
-      <span class="t-head">Proyectos</span>
-      <button class="btn btn-sm btn-tinted" data-new-proj>${icon('plus', 14)} Nuevo proyecto</button>
-    </div>
-    ${projs.length ? `<div class="grid grid-auto">${projs.map(projectTile).join('')}</div>`
-      : `<div class="card">${empty('briefcase', 'Sin proyectos', 'Agrega el primer proyecto de este portafolio.',
-          `<button class="btn btn-primary mt-8" data-new-proj>${icon('plus', 15)} Nuevo proyecto</button>`)}</div>`}`;
+    ${(() => {
+      const abiertos = projs.filter(p => p.status !== 'closed');
+      const cerrados = projs.filter(p => p.status === 'closed')
+        .sort((a, b) => (b.closedAt || '').localeCompare(a.closedAt || ''));
+      return `
+        <div class="row between mb-8" style="padding:0 4px">
+          <span class="row g-8"><span class="t-head">Proyectos</span>
+            ${cerrados.length ? `<span class="badge badge-gray">${abiertos.length} activo${abiertos.length === 1 ? '' : 's'} · ${cerrados.length} cerrado${cerrados.length === 1 ? '' : 's'}</span>` : ''}
+          </span>
+          <button class="btn btn-sm btn-tinted" data-new-proj>${icon('plus', 14)} Nuevo proyecto</button>
+        </div>
+
+        ${abiertos.length ? `<div class="grid grid-auto">${abiertos.map(projectTile).join('')}</div>`
+          : (cerrados.length ? '' : `<div class="card">${empty('briefcase', 'Sin proyectos', 'Agrega el primer proyecto de este portafolio.',
+              `<button class="btn btn-primary mt-8" data-new-proj>${icon('plus', 15)} Nuevo proyecto</button>`)}</div>`)}
+
+        ${cerrados.length ? `
+          <div class="mt-24">
+            <div class="row g-8 mb-8" style="padding:0 4px">
+              ${icon('check', 15)}<span class="t-head muted">Cerrados</span>
+            </div>
+            <div class="grid grid-auto">${cerrados.map(projectTile).join('')}</div>
+          </div>` : ''}`;
+    })()}`;
 
   return {
     toolbar: toolbar(pf.name, `
@@ -1777,25 +1793,39 @@ function projectTile(pr) {
   const acts = store.activitiesOf(pr.id);
   const st = Stats(acts);
   const pf = store.portfolio(pr.portfolioId);
-  const late = acts.filter(a => a.status !== 'done' && a.dueDate && a.dueDate < todayISO()).length;
+  const cerrado = pr.status === 'closed';
+  const late = cerrado ? 0
+    : acts.filter(a => a.status !== 'done' && a.dueDate && a.dueDate < todayISO()).length;
+  const abiertas = st.total - st.done;
 
-  return `<button class="tile" data-open-pr="${pr.id}">
+  return `<button class="tile" data-open-pr="${pr.id}"
+    style="${cerrado ? 'background:var(--surface-2);box-shadow:var(--sh-sm)' : ''}">
     <div class="row between">
-      <div class="tile-icon" style="background:${pr.color || '#007AFF'}">${icon(pr.icon || 'briefcase', 20)}</div>
-      <span class="icon-btn" data-pr-menu="${pr.id}">${icon('more', 16)}</span>
+      <div class="tile-icon" style="background:${cerrado ? 'var(--label-4)' : (pr.color || '#007AFF')}">
+        ${icon(cerrado ? 'check' : (pr.icon || 'briefcase'), 20)}
+      </div>
+      <span class="row g-6">
+        ${cerrado ? `<span class="badge badge-green">Cerrado</span>` : ''}
+        <span class="icon-btn" data-pr-menu="${pr.id}">${icon('more', 16)}</span>
+      </span>
     </div>
     <div>
-      <div class="tile-name">${esc(pr.name)}</div>
+      <div class="tile-name" style="${cerrado ? 'color:var(--label-2)' : ''}">${esc(pr.name)}</div>
       <div class="t-foot">${pf ? esc(pf.name) : 'Sin portafolio'}</div>
     </div>
     <div class="row g-6 wrap">
       <span class="badge badge-gray">${st.done}/${st.total} actividades</span>
-      ${late ? `<span class="badge badge-red">${late} vencida${late === 1 ? '' : 's'}</span>` : ''}
-      ${pr.dueDate ? `<span class="badge badge-${dueTone(pr.dueDate) === 'red' ? 'red' : 'gray'}">${fmtDue(pr.dueDate)}</span>` : ''}
+      ${cerrado
+        ? (abiertas ? `<span class="badge badge-orange">${abiertas} sin terminar</span>` : '')
+        : `${late ? `<span class="badge badge-red">${late} vencida${late === 1 ? '' : 's'}</span>` : ''}
+           ${pr.dueDate ? `<span class="badge badge-${dueTone(pr.dueDate) === 'red' ? 'red' : 'gray'}">${fmtDue(pr.dueDate)}</span>` : ''}`}
     </div>
     <div class="col g-4">
-      <div class="row between t-foot"><span>Avance</span><span class="tnum">${st.pct}%</span></div>
-      <div class="progress"><i style="width:${st.pct}%;background:${pr.color || '#007AFF'}"></i></div>
+      <div class="row between t-foot">
+        <span>${cerrado ? `Cerrado ${fmtDate(pr.closedAt)}` : 'Avance'}</span>
+        <span class="tnum">${st.pct}%</span>
+      </div>
+      <div class="progress"><i style="width:${st.pct}%;background:${cerrado ? 'var(--label-4)' : (pr.color || '#007AFF')}"></i></div>
     </div>
   </button>`;
 }
@@ -1808,10 +1838,15 @@ function bindProjectTiles(root) {
   $$('[data-pr-menu]', root).forEach(b => b.onclick = (e) => {
     e.stopPropagation();
     const id = b.dataset.prMenu;
+    const cerrado = store.project(id)?.status === 'closed';
     openMenu(b, [
       { label: 'Abrir', icon: 'chevR', onClick: () => go('project/' + id) },
       { label: 'Editar', icon: 'pencil', onClick: () => projectEditor(store.project(id)) },
-      { label: 'Nueva actividad', icon: 'plus', onClick: () => activityEditor({ projectId: id }) },
+      ...(cerrado ? [] : [{ label: 'Nueva actividad', icon: 'plus', onClick: () => activityEditor({ projectId: id }) }]),
+      '-',
+      cerrado
+        ? { label: 'Reactivar proyecto', icon: 'reset', onClick: () => reopenProjectFlow(id) }
+        : { label: 'Cerrar proyecto', icon: 'check', onClick: () => closeProjectFlow(id) },
       '-',
       { label: 'Eliminar', icon: 'trash', danger: true, onClick: async () => {
         const pr = store.project(id);
@@ -1826,15 +1861,21 @@ function bindProjectTiles(root) {
 
 function viewProjects() {
   const pfs = store.data.portfolios;
-  const orphan = store.data.projects.filter(p => !p.portfolioId || !store.portfolio(p.portfolioId));
+  const abiertos = store.data.projects.filter(p => p.status !== 'closed');
+  const cerrados = store.data.projects.filter(p => p.status === 'closed')
+    .sort((a, b) => (b.closedAt || '').localeCompare(a.closedAt || ''));
 
+  const huerfanos = abiertos.filter(p => !p.portfolioId || !store.portfolio(p.portfolioId));
   const groups = [
-    ...pfs.map(pf => ({ pf, list: store.projectsOf(pf.id) })),
-    ...(orphan.length ? [{ pf: null, list: orphan }] : [])
+    ...pfs.map(pf => ({ pf, list: abiertos.filter(p => p.portfolioId === pf.id) })),
+    ...(huerfanos.length ? [{ pf: null, list: huerfanos }] : [])
   ].filter(g => g.list.length);
 
   const body = `
-    <div class="page-head"><h1>Proyectos</h1><p>Todos los proyectos del espacio, agrupados por portafolio</p></div>
+    <div class="page-head"><h1>Proyectos</h1>
+      <p>${abiertos.length} activo${abiertos.length === 1 ? '' : 's'}${cerrados.length ? ` · ${cerrados.length} cerrado${cerrados.length === 1 ? '' : 's'}` : ''}</p>
+    </div>
+
     ${groups.length ? groups.map(g => `
       <section class="mb-24">
         <div class="row g-8 mb-8" style="padding:0 4px">
@@ -1844,8 +1885,20 @@ function viewProjects() {
         </div>
         <div class="grid grid-auto">${g.list.map(projectTile).join('')}</div>
       </section>`).join('')
-      : `<div class="card">${empty('briefcase', 'Sin proyectos', 'Crea tu primer proyecto para empezar a organizar actividades.',
-          `<button class="btn btn-primary mt-8" data-new-proj>${icon('plus', 15)} Nuevo proyecto</button>`)}</div>`}`;
+      : (cerrados.length ? '' : `<div class="card">${empty('briefcase', 'Sin proyectos', 'Crea tu primer proyecto para empezar a organizar actividades.',
+          `<button class="btn btn-primary mt-8" data-new-proj>${icon('plus', 15)} Nuevo proyecto</button>`)}</div>`)}
+
+    ${cerrados.length ? `
+      <section class="mt-8">
+        <hr style="margin:8px 0 20px">
+        <div class="row g-8 mb-8" style="padding:0 4px">
+          ${icon('check', 16)}
+          <span class="t-head muted">Cerrados</span>
+          <span class="badge badge-gray">${cerrados.length}</span>
+          <span class="t-cap grow" style="text-align:right">Se conservan completos y se pueden reactivar</span>
+        </div>
+        <div class="grid grid-auto">${cerrados.map(projectTile).join('')}</div>
+      </section>` : ''}`;
 
   return {
     toolbar: toolbar('Proyectos', `<button class="btn btn-primary" data-new-proj>${icon('plus', 15)}<span>Nuevo</span></button>`),
@@ -1855,6 +1908,61 @@ function viewProjects() {
       bindProjectTiles(root);
     }
   };
+}
+
+/* ---------- Cerrar y reactivar un proyecto ---------- */
+async function closeProjectFlow(id) {
+  const pr = store.project(id);
+  if (!pr) return;
+  const abiertas = store.activitiesOf(id).filter(a => a.status !== 'done');
+
+  const r = await openSheet({
+    title: 'Cerrar proyecto',
+    body: `
+      <p class="t-body mb-16">Vas a cerrar <b>${esc(pr.name)}</b>. Se conserva completo —
+      actividades, entregables e historial— y deja de aparecer en Hoy y en la cola de Foco.
+      Podrás reactivarlo cuando quieras.</p>
+
+      ${abiertas.length ? `
+        <div class="banner banner-warn mb-16" style="align-items:flex-start">
+          ${icon('warning', 17)}
+          <span class="col g-4 grow">
+            <b>Quedan ${abiertas.length} actividad${abiertas.length === 1 ? '' : 'es'} sin terminar</b>
+            <span>${esc(abiertas.slice(0, 4).map(a => a.name).join(' · '))}${abiertas.length > 4 ? ' …' : ''}</span>
+          </span>
+        </div>
+        <div class="list">
+          ${toggleRow('cp-done', 'Marcarlas como completadas', false,
+            'Si no, quedan pendientes dentro del proyecto cerrado')}
+        </div>` : ''}`,
+    footer: `<button class="btn btn-gray" data-x="c">Cancelar</button>
+             <button class="btn btn-primary" data-x="s">${icon('check', 15)} Cerrar proyecto</button>`,
+    onMount(el) {
+      bindToggles(el);
+      $('[data-x="c"]', el).onclick = () => closeSheet(null);
+      $('[data-x="s"]', el).onclick = () =>
+        closeSheet({ cerrarPendientes: $('#cp-done', el)?.classList.contains('on') || false });
+    }
+  });
+  if (!r) return;
+
+  const ok = await guardar(() => store.setProjectClosed(id, true, r));
+  if (!ok) return;
+  toast(`«${pr.name}» cerrado`, 'ok', 2600);
+  renderView();
+}
+
+async function reopenProjectFlow(id) {
+  const pr = store.project(id);
+  if (!pr) return;
+  if (!await confirmSheet({
+    title: 'Reactivar proyecto',
+    message: `«${pr.name}» vuelve a estar activo y sus actividades pendientes reaparecen en Hoy y en Foco.`,
+    confirmText: 'Reactivar'
+  })) return;
+  if (!await guardar(() => store.setProjectClosed(id, false))) return;
+  toast(`«${pr.name}» reactivado`, 'ok', 2600);
+  renderView();
 }
 
 function viewProjectDetail({ id }) {
@@ -1867,14 +1975,32 @@ function viewProjectDetail({ id }) {
 
   const byStatus = STATUS_ORDER.map(s => ({ s, list: acts.filter(a => a.status === s) }));
 
+  const cerrado = pr.status === 'closed';
+  const pendientes = acts.filter(a => a.status !== 'done').length;
+
   const body = `
     <div class="row g-12 mb-16">
-      <div class="tile-icon" style="background:${pr.color};width:46px;height:46px;border-radius:13px">${icon(pr.icon || 'briefcase', 24)}</div>
+      <div class="tile-icon" style="background:${cerrado ? 'var(--label-4)' : pr.color};width:46px;height:46px;border-radius:13px">
+        ${icon(cerrado ? 'check' : (pr.icon || 'briefcase'), 24)}
+      </div>
       <div class="col grow" style="min-width:0">
-        <h1 class="t-large" style="font-size:26px">${esc(pr.name)}</h1>
+        <h1 class="t-large row g-8" style="font-size:26px">
+          <span>${esc(pr.name)}</span>
+          ${cerrado ? `<span class="badge badge-green" style="align-self:center">Cerrado</span>` : ''}
+        </h1>
         <p class="t-sub">${pf ? `<a data-go="portfolio/${pf.id}" style="color:${pf.color};cursor:pointer">${esc(pf.name)}</a> · ` : ''}${esc(pr.desc || '')}</p>
       </div>
     </div>
+
+    ${cerrado ? `
+      <div class="banner banner-info mb-16" style="align-items:flex-start">
+        ${icon('check', 17)}
+        <span class="col g-4 grow">
+          <b>Proyecto cerrado el ${fmtDate(pr.closedAt)}</b>
+          <span>No genera trabajo en Hoy ni en Foco.${pendientes ? ` Quedaron ${pendientes} actividad${pendientes === 1 ? '' : 'es'} sin terminar.` : ''} Todo se conserva.</span>
+        </span>
+        <button class="btn btn-sm btn-primary" data-reopen-pr style="flex:0 0 auto">${icon('reset', 14)} Reactivar</button>
+      </div>` : ''}
 
     <div class="grid grid-stats mb-24">
       <div class="stat"><span class="stat-label">Actividades</span><span class="stat-value">${st.total}</span><span class="stat-sub">${st.open} abiertas</span></div>
@@ -1937,11 +2063,16 @@ function viewProjectDetail({ id }) {
   return {
     toolbar: toolbar(pr.name, `
       <button class="icon-btn" data-edit-pr aria-label="Editar">${icon('pencil', 17)}</button>
-      <button class="btn btn-primary" data-new-activity>${icon('plus', 15)}<span>Actividad</span></button>`,
+      ${cerrado
+        ? `<button class="btn btn-primary" data-reopen-pr>${icon('reset', 15)}<span>Reactivar</span></button>`
+        : `<button class="icon-btn" data-close-pr aria-label="Cerrar proyecto" title="Cerrar proyecto">${icon('check', 17)}</button>
+           <button class="btn btn-primary" data-new-activity>${icon('plus', 15)}<span>Actividad</span></button>`}`,
       pf ? 'portfolio/' + pf.id : 'projects'),
     body,
     mount(root) {
       $('[data-edit-pr]')?.addEventListener('click', () => projectEditor(pr));
+      $$('[data-close-pr]').forEach(b => b.onclick = () => closeProjectFlow(id));
+      $$('[data-reopen-pr]').forEach(b => b.onclick = () => reopenProjectFlow(id));
       $$('[data-new-activity]').forEach(b => b.onclick = () => activityEditor({ projectId: id }));
       $$('[data-new-sprint]', root).forEach(b => b.onclick = () => sprintSheet(null, { projectId: id }));
       $$('[data-open-sprint]', root).forEach(b => b.onclick = () => {

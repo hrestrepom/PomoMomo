@@ -594,6 +594,50 @@ export class Store extends Emitter {
     });
   }
 
+  /**
+   * Cierra o reactiva un proyecto. No borra nada: el proyecto sigue
+   * consultable, solo deja de generar trabajo del día.
+   * @param {boolean} cerrar
+   * @param {boolean} cerrarPendientes  marca como hechas sus actividades abiertas
+   */
+  async setProjectClosed(id, cerrar, { cerrarPendientes = false } = {}) {
+    const p = this.project(id);
+    if (!p) return null;
+
+    if (cerrar && cerrarPendientes) {
+      for (const a of this.activitiesOf(id).filter(x => x.status !== 'done')) {
+        await this.setActivityStatus(a.id, 'done');
+      }
+    }
+
+    await this._put('projects', {
+      ...p,
+      status: cerrar ? 'closed' : 'active',
+      closedAt: cerrar ? (p.closedAt || nowISO()) : null,
+      closedBy: cerrar ? (this.user?.uid || '') : ''
+    });
+    return this.project(id);
+  }
+
+  isProjectClosed(projectId) {
+    return this.project(projectId)?.status === 'closed';
+  }
+
+  /** Proyectos abiertos, los que todavía generan trabajo */
+  openProjects() {
+    return this.data.projects.filter(p => p.status !== 'closed');
+  }
+
+  /**
+   * Actividades que cuentan como trabajo vivo: sin terminar y de un
+   * proyecto que siga abierto. Un proyecto cerrado no debe seguir
+   * apareciendo en Hoy ni en la cola de Foco.
+   */
+  liveActivities() {
+    const cerrados = new Set(this.data.projects.filter(p => p.status === 'closed').map(p => p.id));
+    return this.data.activities.filter(a => a.status !== 'done' && !cerrados.has(a.projectId));
+  }
+
   async deleteProject(id) {
     const acts = this.data.activities.filter(a => a.projectId === id);
     for (const a of acts) await this._del('activities', a.id);

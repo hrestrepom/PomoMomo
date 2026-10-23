@@ -7,7 +7,7 @@
 
 /* Debe cambiar en cada publicación: es lo que invalida la caché anterior
    y dispara el relevo del service worker. */
-const VERSION = 'pomomomo-v2.9.0';
+const VERSION = 'pomomomo-v2.10.0';
 const SHELL = [
   './',
   './index.html',

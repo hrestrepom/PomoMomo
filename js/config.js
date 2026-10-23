@@ -30,8 +30,8 @@ export const FIREBASE_SDK = "11.6.0";
 
 /* Versión de la app. Se muestra en Ajustes para poder distinguir
    "el arreglo no sirvió" de "el navegador sirvió una copia vieja". */
-export const APP_VERSION = "2.9.0";
-export const APP_BUILD = "2026-09-27";
+export const APP_VERSION = "2.10.0";
+export const APP_BUILD = "2026-10-23";
 
 /* Detecta si la configuración ya fue completada */
 export const IS_CONFIGURED = !FIREBASE_CONFIG.apiKey.startsWith("PEGA_");
