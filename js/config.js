@@ -30,7 +30,7 @@ export const FIREBASE_SDK = "11.6.0";
 
 /* Versión de la app. Se muestra en Ajustes para poder distinguir
    "el arreglo no sirvió" de "el navegador sirvió una copia vieja". */
-export const APP_VERSION = "2.11.0";
+export const APP_VERSION = "2.11.1";
 export const APP_BUILD = "2026-10-25";
 
 /* Detecta si la configuración ya fue completada */

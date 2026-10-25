@@ -455,6 +455,10 @@ function viewToday() {
     return hasta <= proximoHabil || (desde <= proximoHabil && hasta >= proximoHabil);
   }).length;
 
+  /* Lo guardado antes de fijar la semana de trabajo puede tener fechas en
+     domingo. No se corrigen solas: se ofrece corregirlas. */
+  const enDomingo = store.activitiesOnRestDay();
+
   const hour = new Date().getHours();
   const greet = hour < 12 ? 'Buenos días' : hour < 19 ? 'Buenas tardes' : 'Buenas noches';
   const firstName = (store.user?.displayName || '').split(' ')[0] || '';
@@ -486,6 +490,12 @@ function viewToday() {
         <span>Domingo, día de descanso. No se programa nada hoy${alRetomar
           ? `: el ${fmtDate(proximoHabil)} retomas con ${alRetomar} actividad${alRetomar === 1 ? '' : 'es'}`
           : ''}.</span>
+      </div>` : ''}
+
+    ${enDomingo.length ? `
+      <div class="banner banner-warn mt-16">${icon('warning', 16)}
+        <span class="grow">${enDomingo.length} actividad${enDomingo.length === 1 ? ' quedó' : 'es quedaron'} con fecha en domingo, de antes de fijar la semana de trabajo.</span>
+        <button class="btn btn-sm btn-tinted" data-fix-rest>Revisar</button>
       </div>` : ''}
 
     ${quickAddHtml()}
@@ -592,6 +602,37 @@ function viewToday() {
       bindQuickAdd(root);
       bindActivityRows(root);
       $$('[data-timer-toggle]', root).forEach(b => b.onclick = () => { toggleTimer(); renderView(); });
+      $('[data-fix-rest]', root)?.addEventListener('click', async () => {
+        const lista = store.activitiesOnRestDay();
+        if (!lista.length) return renderView();
+        const confirmado = await openSheet({
+          title: 'Fechas en domingo',
+          body: `
+            <p class="t-sub mb-16">${lista.length === 1 ? 'Quedó' : 'Quedaron'} en un día que no trabajas.
+              Se ${lista.length === 1 ? 'mueve' : 'mueven'} al siguiente día hábil, sin arrastrar a las
+              actividades que dependen de ${lista.length === 1 ? 'ella' : 'ellas'}.</p>
+            <div class="list">${lista.slice(0, 12).map(a => `
+              <div class="list-row">
+                <span class="col grow" style="align-items:flex-start;min-width:0;gap:2px">
+                  <span class="truncate w-full" style="font-size:14px;text-align:left">${esc(a.name)}</span>
+                  <span class="t-foot">${esc(resumenFechas(a))}</span>
+                </span>
+              </div>`).join('')}</div>
+            ${lista.length > 12 ? `<p class="t-foot mt-8">y ${lista.length - 12} más</p>` : ''}`,
+          footer: `<button class="btn btn-gray" data-x="no">Cancelar</button>
+                   <button class="btn btn-primary" data-x="yes">Mover al día hábil</button>`,
+          onMount(el) {
+            $('[data-x="no"]', el).onclick = () => closeSheet(false);
+            $('[data-x="yes"]', el).onclick = () => closeSheet(true);
+          }
+        });
+        if (!confirmado) return;
+        const ok = await guardar(() => store.fixRestDayDates());
+        if (!ok) return;
+        renderView();
+        toast(`${lista.length} actividad${lista.length === 1 ? ' movida' : 'es movidas'}`, 'ok');
+      });
+
       $('[data-remind-cfg]', root)?.addEventListener('click', async () => {
         const v = await promptSheet({
           title: 'Aviso anticipado',

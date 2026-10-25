@@ -7,7 +7,7 @@
 
 import { FIREBASE_CONFIG, WORKSPACE_ID, FIREBASE_SDK, IS_CONFIGURED, DEFAULT_TIMER } from './config.js';
 import { nextOccurrence } from './quickadd.js';
-import { workDay } from './ui.js';
+import { workDay, isRestDay } from './ui.js';
 
 const LS_KEY   = 'pomomomo.v2';
 const LS_PREFS = 'pomomomo.prefs';
@@ -637,6 +637,30 @@ export class Store extends Emitter {
   liveActivities() {
     const cerrados = new Set(this.data.projects.filter(p => p.status === 'closed').map(p => p.id));
     return this.data.activities.filter(a => a.status !== 'done' && !cerrados.has(a.projectId));
+  }
+
+  /**
+   * Actividades vivas que quedaron con alguna fecha en domingo, de antes
+   * de que la semana de trabajo fuera lunes a sábado. No se tocan solas:
+   * son datos del usuario y él decide cuándo corregirlos.
+   */
+  activitiesOnRestDay() {
+    return this.liveActivities().filter(
+      a => isRestDay(a.startDate) || isRestDay(a.dueDate) || isRestDay(a.recur?.until)
+    );
+  }
+
+  /**
+   * Corre al día hábil las que quedaron en domingo. Sin cascada: es un
+   * saneamiento de un día, no una reprogramación del encadenamiento.
+   * @returns {number} cuántas se movieron
+   */
+  async fixRestDayDates() {
+    const pendientes = this.activitiesOnRestDay();
+    for (const a of pendientes) {
+      await this.saveActivity({ ...a, _noCascade: true });   // saveActivity ya corrige las fechas
+    }
+    return pendientes.length;
   }
 
   async deleteProject(id) {
