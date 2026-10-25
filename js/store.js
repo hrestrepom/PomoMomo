@@ -7,6 +7,7 @@
 
 import { FIREBASE_CONFIG, WORKSPACE_ID, FIREBASE_SDK, IS_CONFIGURED, DEFAULT_TIMER } from './config.js';
 import { nextOccurrence } from './quickadd.js';
+import { workDay } from './ui.js';
 
 const LS_KEY   = 'pomomomo.v2';
 const LS_PREFS = 'pomomomo.prefs';
@@ -652,6 +653,17 @@ export class Store extends Emitter {
     const prev = isNew ? null : this.data.activities.find(x => x.id === a.id);
 
     const { _noCascade, ...limpio } = a;
+
+    /* Se trabaja de lunes a sábado. Venga del formulario, de la captura
+       rápida, de una repetición o de un arrastre, ninguna fecha queda en
+       domingo. El fin de una serie se corre hacia atrás, para no alargarla
+       más allá de lo pedido. */
+    if (limpio.startDate) limpio.startDate = workDay(limpio.startDate);
+    if (limpio.dueDate)   limpio.dueDate   = workDay(limpio.dueDate);
+    if (limpio.recur?.until) {
+      limpio.recur = { ...limpio.recur, until: workDay(limpio.recur.until, -1) };
+    }
+
     const rec = await this._put('activities', {
       ...limpio,
       dependsOn:   limpio.dependsOn ?? prev?.dependsOn ?? [],
@@ -787,7 +799,7 @@ export class Store extends Emitter {
       kind:       d.kind ?? prev?.kind ?? 'entregable',
       activityId: d.activityId ?? prev?.activityId ?? '',
       desc:       d.desc ?? prev?.desc ?? '',
-      targetDate: d.targetDate ?? prev?.targetDate ?? '',
+      targetDate: workDay(d.targetDate ?? prev?.targetDate ?? ''),
       achieved:   d.achieved ?? prev?.achieved ?? false,
       achievedAt: d.achievedAt ?? prev?.achievedAt ?? null,
       order:      d.order ?? prev?.order ?? Date.now(),
@@ -843,9 +855,10 @@ export class Store extends Emitter {
         if (vistas.has(s.id)) continue;
         vistas.add(s.id);
         const patch = { ...s, updatedAt: nowISO() };
-        if (s.startDate) patch.startDate = shiftISO(s.startDate, deltaDays);
-        if (s.dueDate)   patch.dueDate   = shiftISO(s.dueDate, deltaDays);
-        if (s.recur?.until) patch.recur = { ...s.recur, until: shiftISO(s.recur.until, deltaDays) };
+        // El desplazamiento tampoco puede dejar a nadie en domingo
+        if (s.startDate) patch.startDate = workDay(shiftISO(s.startDate, deltaDays));
+        if (s.dueDate)   patch.dueDate   = workDay(shiftISO(s.dueDate, deltaDays));
+        if (s.recur?.until) patch.recur = { ...s.recur, until: workDay(shiftISO(s.recur.until, deltaDays), -1) };
         delete patch._movidas; delete patch._delta;
         await this._put('activities', patch);
         await this.log(s.id, 'shift', {
@@ -1100,6 +1113,9 @@ export class Store extends Emitter {
     const prev = s.id ? this.data.sprints.find(x => x.id === s.id) : null;
     const rec = { ...s, autoFit: s.autoFit ?? prev?.autoFit ?? false, createdAt: s.createdAt || prev?.createdAt || nowISO() };
     if (rec.autoFit) Object.assign(rec, this.sprintWindow(rec) || {});
+    // El sprint empieza y termina en día de trabajo
+    if (rec.start) rec.start = workDay(rec.start);
+    if (rec.end)   rec.end   = workDay(rec.end, -1);
     return this._put('sprints', rec);
   }
   async deleteSprint(id) { return this._del('sprints', id); }

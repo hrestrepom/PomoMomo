@@ -10,7 +10,10 @@
      "Sacar la basura cada martes"
    ========================================================================== */
 
-import { todayISO, addDays } from './ui.js';
+import { todayISO, addDays, workDay, addWorkDays, isRestDay } from './ui.js';
+import { REST_DAYS } from './config.js';
+
+const REST_DOW = new Set(REST_DAYS);
 
 /* Quita acentos para comparar: "miércoles" y "miercoles" deben coincidir. */
 const norm = (s) => String(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
@@ -38,7 +41,8 @@ function proximoDia(targetDow, desdeISO) {
   const actual = hoy.getDay();
   let delta = (targetDow - actual + 7) % 7;
   if (delta === 0) delta = 7;          // "el lunes" dicho un lunes = el siguiente
-  return addDays(desdeISO, delta);
+  // Un domingo pedido explícitamente se corre al lunes: no se trabaja
+  return workDay(addDays(desdeISO, delta));
 }
 
 function fechaValida(y, m, d) {
@@ -79,10 +83,14 @@ export function parse(raw, projects = []) {
     const unidad = norm(m[2]);
 
     if (DIAS[unidad.replace(/s$/, '')] !== undefined || DIAS[unidad] !== undefined) {
-      const dow = DIAS[unidad] ?? DIAS[unidad.replace(/s$/, '')];
+      let dow = DIAS[unidad] ?? DIAS[unidad.replace(/s$/, '')];
+      // "cada domingo" no es programable: la serie pasa al lunes
+      let avisoDescanso = false;
+      if (REST_DOW.has(dow)) { dow = 1; avisoDescanso = true; }
       recur = { freq: 'weekly', interval: 1, weekday: dow };
       if (!dueDate) dueDate = proximoDia(dow, hoy);
-      tokens.push({ tipo: 'recurrencia', texto: `cada ${m[2]}` });
+      tokens.push({ tipo: 'recurrencia', texto: avisoDescanso ? 'cada lunes' : `cada ${m[2]}` });
+      if (avisoDescanso) tokens.push({ tipo: 'aviso', texto: 'los domingos no se trabajan' });
       return true;
     }
     if (/^dias?$/.test(unidad))          recur = { freq: 'daily',   interval: n };
@@ -128,7 +136,9 @@ export function parse(raw, projects = []) {
       const dow = DIAS[norm(m[1])];
       if (dow === undefined) return false;
       dueDate = proximoDia(dow, hoy);
-      tokens.push({ tipo: 'fecha', texto: m[1].toLowerCase() });
+      // proximoDia ya corrió el domingo al lunes; hay que decirlo
+      if (REST_DOW.has(dow)) tokens.push({ tipo: 'aviso', texto: 'el domingo no se trabaja → lunes' });
+      else tokens.push({ tipo: 'fecha', texto: m[1].toLowerCase() });
     });
   }
   /* "15 de marzo" */
@@ -186,15 +196,23 @@ export function parse(raw, projects = []) {
   /* Una tarea que se repite necesita un ancla: sin fecha nunca aparecería
      en Hoy y la siguiente ocurrencia no tendría desde dónde contar. */
   if (recur && !dueDate) {
-    dueDate = hoy;
-    tokens.push({ tipo: 'fecha', texto: 'empieza hoy' });
+    dueDate = workDay(hoy);
+    tokens.push({ tipo: 'fecha', texto: dueDate === hoy ? 'empieza hoy' : 'empieza el lunes' });
+  }
+
+  /* Nada se programa en domingo: la fecha detectada se corre al día hábil
+     siguiente. Se avisa, para que no parezca que el texto se entendió mal. */
+  if (dueDate && isRestDay(dueDate)) {
+    dueDate = workDay(dueDate);
+    tokens.push({ tipo: 'aviso', texto: 'caía en domingo → lunes' });
   }
 
   /* La duración define la ventana: la fecha detectada es el inicio y el
-     fin se calcula, salvo que no haya fecha, donde arranca hoy. */
+     fin se calcula en días de trabajo, salvo que no haya fecha, donde
+     arranca hoy (o el lunes, si hoy es domingo). */
   if (durationDays > 0) {
-    startDate = dueDate || hoy;
-    dueDate = addDays(startDate, durationDays - 1);
+    startDate = workDay(dueDate || hoy);
+    dueDate = addWorkDays(startDate, durationDays - 1);
   }
 
   recur = withAnchor(recur, dueDate);
@@ -229,14 +247,19 @@ const fmt = (d) =>
  * original. Sin él la fecha se degrada: un vencimiento el 31 de enero
  * pasaría al 28 de febrero y se quedaría en el 28 para siempre, en vez
  * de volver al 31 en los meses que sí lo tienen.
+ *
+ * Ninguna repetición cae en domingo: la que caería se corre al lunes.
+ * El desplazamiento no arrastra la serie, porque la siguiente se calcula
+ * desde el ancla o desde el ritmo original, no desde la fecha corrida.
  */
 export function nextOccurrence(recur, desdeISO) {
   if (!recur) return '';
   const base = desdeISO || todayISO();
   const n = recur.interval || 1;
 
-  if (recur.freq === 'daily')  return addDays(base, n);
-  if (recur.freq === 'weekly') return addDays(base, 7 * n);
+  // Las diarias cuentan días de trabajo: de sábado pasan al lunes
+  if (recur.freq === 'daily')  return addWorkDays(base, n);
+  if (recur.freq === 'weekly') return workDay(addDays(base, 7 * n));
 
   const d = new Date(base + 'T12:00:00');
   const ancla = recur.anchorDay || d.getDate();
@@ -248,13 +271,17 @@ export function nextOccurrence(recur, desdeISO) {
     d.setDate(1);
     d.setFullYear(d.getFullYear() + n);
   } else {
-    return fmt(d);
+    return workDay(fmt(d));
   }
 
   // Si el mes destino no tiene ese día (31 en abril), toma el último
   const ultimo = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
   d.setDate(Math.min(ancla, ultimo));
-  return fmt(d);
+  const exacta = fmt(d);
+  const corrida = workDay(exacta);
+  // Correr hacia adelante no debe empujar la fecha al mes siguiente:
+  // un 31 que cae domingo se adelanta al sábado 30, no al día 1.
+  return corrida.slice(0, 7) === exacta.slice(0, 7) ? corrida : workDay(exacta, -1);
 }
 
 /** Añade el día ancla a una recurrencia mensual o anual. */

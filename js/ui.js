@@ -3,6 +3,10 @@
    Iconos, formateo, hojas modales, menús, toasts y diálogos.
    ========================================================================== */
 
+import { REST_DAYS, WORK_WEEK_LABEL } from './config.js';
+
+export { WORK_WEEK_LABEL };
+
 /* ==========================================================================
    Iconos (trazo, estilo SF Symbols)
    ========================================================================== */
@@ -100,15 +104,64 @@ export function daysBetween(a, b) {
   return Math.round((d2 - d1) / 86400000);
 }
 
+/* ==========================================================================
+   Semana de trabajo
+   El domingo no se trabaja (REST_DAYS en config.js). Toda fecha que calcule
+   la app pasa por aquí, para que nada quede programado en un día de
+   descanso y para que las duraciones midan días reales de trabajo.
+   ========================================================================== */
+
+/** Día de la semana de una fecha AAAA-MM-DD (0 = domingo) */
+export const dowOf = (iso) => new Date(iso + 'T12:00:00').getDay();
+
+/** ¿Esa fecha cae en día de descanso? */
+export const isRestDay = (iso) => !!iso && REST_DAYS.includes(dowOf(iso));
+
 /**
- * Duración en días de una actividad, contando inicio y fin inclusive:
- * del 10 al 12 son 3 días de trabajo, no 2.
+ * Lleva una fecha al día hábil más cercano.
+ * @param {string} iso
+ * @param {number} dir  1 = hacia adelante (por defecto), -1 = hacia atrás
+ */
+export function workDay(iso, dir = 1) {
+  if (!iso) return iso;
+  let d = iso;
+  let guard = 0;
+  while (isRestDay(d) && guard++ < 14) d = addDays(d, dir < 0 ? -1 : 1);
+  return d;
+}
+
+/**
+ * Suma `n` días hábiles. Con n = 0 solo corrige la fecha si cayó en
+ * domingo, así que sirve igual para avanzar que para sanear.
+ */
+export function addWorkDays(iso, n = 0) {
+  if (!iso) return iso;
+  const paso = n < 0 ? -1 : 1;
+  let d = workDay(iso, paso);
+  for (let i = 0; i < Math.abs(n); i++) {
+    do { d = addDays(d, paso); } while (isRestDay(d));
+  }
+  return d;
+}
+
+/** Días hábiles entre dos fechas, ambas inclusive */
+export function workDaysBetween(a, b) {
+  if (!a || !b) return 0;
+  const total = daysBetween(a, b);
+  if (total < 0) return 0;
+  let n = 0;
+  for (let i = 0; i <= total && i < 4000; i++) if (!isRestDay(addDays(a, i))) n++;
+  return n;
+}
+
+/**
+ * Duración de una actividad en días de trabajo, inicio y fin inclusive:
+ * del 10 al 12 son 3 días. Los domingos no cuentan, porque no se trabajan:
+ * del sábado al lunes son 2 días de trabajo, no 3.
  * @returns {number} 0 si no hay ventana definida
  */
 export function durationDays(startDate, endDate) {
-  if (!startDate || !endDate) return 0;
-  const n = daysBetween(startDate, endDate) + 1;
-  return n > 0 ? n : 0;
+  return workDaysBetween(startDate, endDate);
 }
 
 /** "3 días" · "1 día" · "2 semanas" cuando la cifra es redonda */

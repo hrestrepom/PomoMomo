@@ -16,6 +16,7 @@ import {
   icon, esc, $, $$, toast, openSheet, closeSheet, confirmSheet, promptSheet, openMenu,
   fmtDate, fmtDue, dueTone, fmtAgo, fmtTime, mmss, fmtDuration, todayISO,
   dayKey, addDays, daysBetween, durationDays, fmtDays, workWindow,
+  workDay, addWorkDays, workDaysBetween, isRestDay, WORK_WEEK_LABEL,
   avatar, ring, empty, makeDraggable, makeDropZone,
   chime, colorFor, initials
 } from './ui.js';
@@ -441,6 +442,19 @@ function viewToday() {
     .sort((x, y) => x.f.localeCompare(y.f))
     .slice(0, 8);
 
+  /* El domingo no se trabaja: no se programa nada y se muestra con qué
+     se retoma, en vez de dejar la pantalla como un día cualquiera. */
+  const esDescanso = isRestDay(today);
+  const proximoHabil = workDay(addDays(today, 1));
+  /* Lo que estará sobre la mesa al volver: lo vencido, lo que vence ese
+     día y lo que ya está en su ventana de trabajo. */
+  const alRetomar = open.filter(a => {
+    const hasta = a.dueDate || a.startDate;
+    if (!hasta) return false;
+    const desde = a.startDate || a.dueDate;
+    return hasta <= proximoHabil || (desde <= proximoHabil && hasta >= proximoHabil);
+  }).length;
+
   const hour = new Date().getHours();
   const greet = hour < 12 ? 'Buenos días' : hour < 19 ? 'Buenas tardes' : 'Buenas noches';
   const firstName = (store.user?.displayName || '').split(' ')[0] || '';
@@ -466,6 +480,13 @@ function viewToday() {
     </div>
 
     ${bannerIfLocal()}
+
+    ${esDescanso ? `
+      <div class="banner banner-info mt-16">${icon('info', 16)}
+        <span>Domingo, día de descanso. No se programa nada hoy${alRetomar
+          ? `: el ${fmtDate(proximoHabil)} retomas con ${alRetomar} actividad${alRetomar === 1 ? '' : 'es'}`
+          : ''}.</span>
+      </div>` : ''}
 
     ${quickAddHtml()}
 
@@ -1069,13 +1090,25 @@ function resumenFechas(a) {
 function ocurrenciasPrevistas(freq, inicio, hasta, max = 4) {
   if (!freq || !inicio) return [];
   const out = [];
-  let f = inicio;
+  let f = workDay(inicio);        // la primera tampoco cae en domingo
   let guard = 0;
   while (f && out.length < max && guard++ < 200) {
     if (hasta && f > hasta) break;
     out.push(f);
     f = nextOccurrence({ freq, interval: 1, anchorDay: parseInt(inicio.slice(8, 10), 10) }, f);
   }
+  return out;
+}
+
+/**
+ * Los próximos `n` días de trabajo a partir de una fecha, la propia
+ * incluida si es hábil. Los domingos no aparecen: no hay carga que mirar
+ * en un día en que no se trabaja.
+ */
+function diasHabiles(desde, n) {
+  const out = [];
+  let d = workDay(desde);
+  for (let i = 0; i < n; i++) { out.push(d); d = addWorkDays(d, 1); }
   return out;
 }
 
@@ -1506,11 +1539,14 @@ function rescheduleSheet(activityId) {
   if (!a) return;
   const hoy = todayISO();
 
+  /* Las opciones rápidas cuentan días de trabajo: un "mañana" dicho en
+     sábado es el lunes, porque el domingo no se trabaja. */
+  const base = workDay(hoy);
   const opciones = [
-    { d: hoy,               label: 'Hoy' },
-    { d: addDays(hoy, 1),   label: 'Mañana' },
-    { d: addDays(hoy, 2),   label: 'Pasado mañana' },
-    { d: addDays(hoy, 7),   label: 'En una semana' }
+    { d: base,                  label: isRestDay(hoy) ? 'El lunes' : 'Hoy' },
+    { d: addWorkDays(base, 1),  label: 'Siguiente día de trabajo' },
+    { d: addWorkDays(base, 2),  label: 'En 2 días de trabajo' },
+    { d: addWorkDays(base, 6),  label: 'En una semana' }
   ];
 
   openSheet({
@@ -2789,14 +2825,28 @@ function activityEditor(a = null) {
         $('#a-due-lbl', el).textContent = 'Fecha límite';
         daysWrap.classList.remove('hidden');
         const n = durationDays(inStart.value, inDue.value);
-        if (n) hint.textContent = `${fmtDays(n)} de trabajo, del ${fmtDate(inStart.value)} al ${fmtDate(inDue.value)}.`;
+        if (n) hint.textContent = `${fmtDays(n)} de trabajo (${WORK_WEEK_LABEL}), del ${fmtDate(inStart.value)} al ${fmtDate(inDue.value)}.`;
         else if (inDue.value && !inStart.value) hint.textContent = 'Solo hay fecha límite. Agrega el inicio para saber cuántos días tomará.';
         else if (inStart.value && !inDue.value) hint.textContent = 'Indica la duración o la fecha límite.';
         else hint.textContent = '';
       };
       inRecur.addEventListener('change', pintarHint);
 
+      /* Un domingo elegido en el calendario se corrige al instante, para
+         que lo que se ve en el formulario sea lo que se va a guardar. */
+      const sanearDomingos = () => {
+        if (inStart.value && isRestDay(inStart.value)) {
+          inStart.value = workDay(inStart.value);
+          toast('El domingo no se trabaja: el inicio pasa al lunes', 'ok', 2600);
+        }
+        if (inDue.value && isRestDay(inDue.value)) {
+          inDue.value = esRepetitiva() ? workDay(inDue.value, -1) : workDay(inDue.value);
+          toast('El domingo no se trabaja: la fecha se movió', 'ok', 2600);
+        }
+      };
+
       const sincronizarDesdeFechas = () => {
+        sanearDomingos();
         if (esRepetitiva()) { pintarHint(); return; }   // aquí no hay duración que calcular
         if (inStart.value && inDue.value) {
           if (inDue.value < inStart.value) { inDue.value = inStart.value; }
@@ -2806,10 +2856,11 @@ function activityEditor(a = null) {
       };
 
       inStart.addEventListener('change', () => {
+        sanearDomingos();
         if (esRepetitiva()) { pintarHint(); return; }
         // Con duración ya fijada, mover el inicio arrastra el fin
         const n = parseInt(inDays.value, 10);
-        if (inStart.value && n > 0) inDue.value = addDays(inStart.value, n - 1);
+        if (inStart.value && n > 0) inDue.value = addWorkDays(inStart.value, n - 1);
         sincronizarDesdeFechas();
       });
       inDue.addEventListener('change', sincronizarDesdeFechas);
@@ -2842,9 +2893,9 @@ function activityEditor(a = null) {
                de la predecesora: en una serie eso es recur.until, no dueDate. */
             const fin = finDe(store.activity(id));
             if (!inStart.value && fin) {
-              inStart.value = addDays(fin, 1);
+              inStart.value = addWorkDays(fin, 1);
               const n = parseInt(inDays.value, 10) || 1;
-              if (!esRepetitiva()) inDue.value = addDays(inStart.value, n - 1);
+              if (!esRepetitiva()) inDue.value = addWorkDays(inStart.value, n - 1);
               sincronizarDesdeFechas();
             }
           }
@@ -2899,9 +2950,12 @@ function activityEditor(a = null) {
       inDays.addEventListener('input', () => {
         const n = clampInt(inDays.value, 1, 999, 0);
         if (!n) { pintarHint(); return; }
-        if (!inStart.value && inDue.value)      inStart.value = addDays(inDue.value, -(n - 1));
-        else if (inStart.value)                 inDue.value   = addDays(inStart.value, n - 1);
-        else { inStart.value = todayISO(); inDue.value = addDays(todayISO(), n - 1); }
+        if (!inStart.value && inDue.value)      inStart.value = addWorkDays(inDue.value, -(n - 1));
+        else if (inStart.value)                 inDue.value   = addWorkDays(inStart.value, n - 1);
+        else {
+          inStart.value = workDay(todayISO());
+          inDue.value   = addWorkDays(inStart.value, n - 1);
+        }
         pintarHint();
       });
       pintarHint();
@@ -2918,7 +2972,7 @@ function activityEditor(a = null) {
         let inicio = inStart.value;
         let due, recur;
         if (freq) {
-          if (!inicio) inicio = todayISO();
+          if (!inicio) inicio = workDay(todayISO());
           due = inicio;
           recur = withAnchor(
             { ...(cur.recur || {}), freq, interval: cur.recur?.interval || 1, until: inDue.value || '' },
@@ -3446,7 +3500,7 @@ function viewMetrics() {
           <div class="row g-16 mt-12 wrap">
             <span class="t-foot">Restante: <b class="tnum">${bd.remaining}</b> pts</span>
             <span class="t-foot">Velocidad: <b class="tnum">${bd.velocity}</b> pts/día</span>
-            <span class="t-foot">Días restantes: <b class="tnum">${bd.daysLeft}</b></span>
+            <span class="t-foot">Días de trabajo restantes: <b class="tnum">${bd.daysLeft}</b></span>
             <span class="t-foot">Proyección: <b>${bd.forecast}</b></span>
           </div>`
           : empty('chart', 'Sin sprint definido',
@@ -3507,16 +3561,16 @@ function viewMetrics() {
     ${(() => {
       const conVentana = acts.filter(a => a.startDate && a.dueDate && a.status !== 'done');
       if (!conVentana.length) return '';
-      /* Próximos 21 días: cuántas actividades caen sobre cada uno.
-         Es lo que revela los días sobrecargados antes de que lleguen. */
-      const dias = Array.from({ length: 21 }, (_, i) => addDays(today, i));
+      /* Próximos 21 días de trabajo: cuántas actividades caen sobre cada
+         uno. Es lo que revela los días sobrecargados antes de que lleguen. */
+      const dias = diasHabiles(today, 21);
       const carga = dias.map(d => conVentana.filter(a => a.startDate <= d && a.dueDate >= d).length);
       const pico = Math.max(...carga);
       const diaPico = dias[carga.indexOf(pico)];
       const ocupados = carga.filter(n => n > 0).length;
       return `<div class="card mb-16">
         <div class="card-head">
-          <span class="card-title">Actividades en curso por día · 21 días</span>
+          <span class="card-title">Actividades en curso por día · 21 días de trabajo</span>
           <span class="t-foot">${ocupados} días ocupados · pico de ${pico}</span>
         </div>
         <div class="chart-box"><canvas id="c-carga"></canvas></div>
@@ -3593,7 +3647,7 @@ function viewMetrics() {
         const cc = $('#c-carga');   // solo si hay actividades con duración
         if (cc) {
           const conVentana = acts.filter(a => a.startDate && a.dueDate && a.status !== 'done');
-          const dias = Array.from({ length: 21 }, (_, i) => addDays(today, i));
+          const dias = diasHabiles(today, 21);
           Chart.bars(cc, {
             labels: dias.map(d => d.slice(8) + '/' + d.slice(5, 7)),
             values: dias.map(d => conVentana.filter(a => a.startDate <= d && a.dueDate >= d).length),
@@ -3639,6 +3693,9 @@ function buildBurndown(fallbackActs, sprint) {
   const start = sprint.start, end = sprint.end;
   const n = Math.max(1, daysBetween(start, end)) + 1;
   const days = Array.from({ length: n }, (_, i) => addDays(start, i));
+  /* La línea ideal baja por días de trabajo, no por días de calendario:
+     en domingo se queda plana porque no se avanza. */
+  const habiles = Math.max(1, workDaysBetween(start, end));
 
   /* Con selección explícita se respeta tal cual; si no, se descartan las
      creadas después del cierre del sprint. */
@@ -3648,7 +3705,10 @@ function buildBurndown(fallbackActs, sprint) {
   });
   const total = inSprint.reduce((s, a) => s + (+a.points || 0), 0);
 
-  const ideal = days.map((_, i) => Math.max(0, total - (total / Math.max(1, n - 1)) * i));
+  const ideal = days.map(d => {
+    const quemados = Math.max(0, workDaysBetween(start, d) - 1);
+    return Math.max(0, total - (total / Math.max(1, habiles - 1)) * quemados);
+  });
 
   const todayIdx = days.indexOf(today);
   const actual = days.map((d, i) => {
@@ -3666,9 +3726,10 @@ function buildBurndown(fallbackActs, sprint) {
   const delta = Math.round(idealNow - remaining);
   const status = delta > 1 ? 'ahead' : delta < -1 ? 'behind' : 'ok';
 
-  const elapsed = Math.max(1, lastIdx);
+  // Velocidad y pronóstico en días de trabajo: los domingos no cuentan
+  const elapsed = Math.max(1, workDaysBetween(start, days[lastIdx]) - 1);
   const velocity = +((total - remaining) / elapsed).toFixed(1);
-  const daysLeft = Math.max(0, daysBetween(today, end));
+  const daysLeft = Math.max(0, workDaysBetween(today, end) - 1);
 
   let forecast = '—';
   if (remaining === 0) forecast = 'Completado';
@@ -3688,7 +3749,7 @@ function sprintSheet(sprint, preset = {}) {
   const isNew = !sprint?.id;
   const cur = {
     name: `Sprint ${store.data.sprints.length + 1}`,
-    start: todayISO(), end: addDays(todayISO(), 13),
+    start: workDay(todayISO()), end: addWorkDays(workDay(todayISO()), 11),   // dos semanas de lun a sáb
     projectId: '', activityIds: [], autoFit: false,
     ...preset, ...sprint
   };
@@ -4282,6 +4343,10 @@ function viewSettings() {
           <span class="t-foot tnum">${APP_VERSION} · ${APP_BUILD}</span>
         </div>
         <div class="list-row"><span class="grow t-sub">Modo</span><span class="t-foot">${store.mode === 'cloud' ? 'Nube' : 'Local'}</span></div>
+        <div class="list-row">
+          <span class="grow t-sub">Semana de trabajo</span>
+          <span class="t-foot">Lunes a sábado · el domingo se descansa</span>
+        </div>
         <div class="list-row"><span class="grow t-sub">Instalable</span><span class="t-foot">${window.matchMedia('(display-mode: standalone)').matches ? 'Instalada' : 'Sí (Compartir → Añadir a inicio)'}</span></div>
       </div>
 

@@ -30,11 +30,18 @@ export const FIREBASE_SDK = "11.6.0";
 
 /* Versión de la app. Se muestra en Ajustes para poder distinguir
    "el arreglo no sirvió" de "el navegador sirvió una copia vieja". */
-export const APP_VERSION = "2.10.0";
-export const APP_BUILD = "2026-10-23";
+export const APP_VERSION = "2.11.0";
+export const APP_BUILD = "2026-10-25";
 
 /* Detecta si la configuración ya fue completada */
 export const IS_CONFIGURED = !FIREBASE_CONFIG.apiKey.startsWith("PEGA_");
+
+/* Semana de trabajo: de lunes a sábado. El domingo se descansa, así que
+   ninguna fecha que calcule la app cae en domingo y los domingos no se
+   cuentan como días de trabajo. 0 = domingo, 6 = sábado.
+   Cambiar este arreglo es lo único que hace falta para mover el descanso. */
+export const REST_DAYS = [0];
+export const WORK_WEEK_LABEL = "lun–sáb";
 
 /* Valores por defecto del temporizador (minutos) */
 export const DEFAULT_TIMER = {
